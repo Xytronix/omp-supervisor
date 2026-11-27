@@ -69,7 +69,7 @@ function agentPromptSource(source) {
     return out;
 }
 
-const SUPERVISOR_PLUGIN_VERSION = "0.2.1";
+const SUPERVISOR_PLUGIN_VERSION = "0.3.0";
 const SUPERVISOR_RELEASE_REPO = "Xytronix/omp-supervisor";
 const SUPERVISOR_PORT = Number.isSafeInteger(Number(process.env.SUPERVISOR_PORT)) && Number(process.env.SUPERVISOR_PORT) > 0 ? Number(process.env.SUPERVISOR_PORT) : 18200;
 const HOME_DIR = os.homedir();
@@ -87,7 +87,16 @@ const RESULT_MESSAGE_TYPE = "supervisor-result";
 const COMMAND_MESSAGE_TYPE = "supervisor-command";
 const WIDGET_KEY = "supervisor-remote-jobs";
 const HOOK_POLL_MS = 3000;
-const FALLBACK_POLL_MS = 5000;
+const PUMP_MS = 2000;
+const TRANSCRIPT_POLL_MS = 1500;
+const EVENTS_PAGE_LIMIT = 200;
+const PUMP_MAX_PAGES = 20;
+const ARG_MAX_CHARS = 200;
+const MESSAGE_MAX_CHARS = 8000;
+const TOOL_RESULT_MAX_CHARS = 2000;
+const LIVE_TEXT_MAX = 4000;
+const DISPLAY_MAX_LINES = 5000;
+const TRANSCRIPT_TEXT_LINES = 200;
 const USER_ENV = (globalThis[Symbol.for("omp-supervisor.user-env")] ??= {
     url: String(process.env.SUPERVISOR_URL || "").trim(),
     token: String(process.env.SUPERVISOR_TOKEN || "").trim(),
@@ -441,15 +450,245 @@ function jobLabel(job) {
     return job.name ? `${job.name} (${job.jobId})` : job.jobId;
 }
 
+function oneLine(value, max = 160) {
+    const text = String(value ?? "").replace(/\s+/g, " ").trim();
+    return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function clipText(text, max) {
+    return text.length > max ? `${text.slice(0, max)}\n... (${text.length - max} more chars)` : text;
+}
+
+const isRecord = value => value !== null && typeof value === "object" && !Array.isArray(value);
+
+function contentText(content) {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content.filter(part => isRecord(part) && part.type === "text" && typeof part.text === "string").map(part => part.text).join("\n");
+}
+
+function compactValue(value, depth = 0) {
+    if (typeof value === "string") return value.length > ARG_MAX_CHARS ? `${value.slice(0, ARG_MAX_CHARS)}...` : value;
+    if (Array.isArray(value)) return depth >= 2 ? `[${value.length} items]` : value.slice(0, 20).map(item => compactValue(item, depth + 1));
+    if (isRecord(value)) {
+        if (depth >= 2) return "{...}";
+        const out = {};
+        for (const [key, item] of Object.entries(value).slice(0, 30)) out[key] = compactValue(item, depth + 1);
+        return out;
+    }
+    return value;
+}
+
+function argsLine(args) {
+    if (!isRecord(args)) return "";
+    return oneLine(Object.entries(args).map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`).join(" "), 120);
+}
+
+function lastTextLine(text) {
+    const lines = String(text || "").split("\n").map(line => line.trim()).filter(Boolean);
+    return lines.length ? oneLine(lines[lines.length - 1]) : "";
+}
+
+function effectiveThinking(value) {
+    return typeof value === "string" && value && value !== "auto" ? value : "";
+}
+
+function compactMessage(message) {
+    if (!isRecord(message)) return undefined;
+    const timestamp = typeof message.timestamp === "number" ? message.timestamp : Date.now();
+    if (message.role === "user" || message.role === "developer") {
+        const text = contentText(message.content).trim();
+        return text ? { role: message.role, content: [{ type: "text", text: clipText(text, MESSAGE_MAX_CHARS) }], timestamp } : undefined;
+    }
+    if (message.role === "toolResult") {
+        return {
+            role: "toolResult", toolCallId: String(message.toolCallId || ""), toolName: String(message.toolName || ""), isError: message.isError === true,
+            content: [{ type: "text", text: clipText(contentText(message.content), TOOL_RESULT_MAX_CHARS) }], timestamp,
+        };
+    }
+    if (message.role !== "assistant") return undefined;
+    const content = [];
+    for (const part of Array.isArray(message.content) ? message.content : [{ type: "text", text: contentText(message.content) }]) {
+        if (!isRecord(part)) continue;
+        if (part.type === "text" && typeof part.text === "string" && part.text.trim()) content.push({ type: "text", text: clipText(part.text, MESSAGE_MAX_CHARS) });
+        else if (part.type === "toolCall" && typeof part.name === "string") content.push({ type: "toolCall", id: String(part.id || ""), name: part.name, arguments: compactValue(isRecord(part.arguments) ? part.arguments : {}) });
+    }
+    const errorMessage = typeof message.errorMessage === "string" ? oneLine(message.errorMessage, 500) : "";
+    if (content.length === 0 && !errorMessage) return undefined;
+    const out = { role: "assistant", content, stopReason: typeof message.stopReason === "string" ? message.stopReason : "stop", timestamp };
+    for (const key of ["api", "provider", "model"]) if (typeof message[key] === "string") out[key] = message[key];
+    if (errorMessage) out.errorMessage = errorMessage;
+    return out;
+}
+
+function messageDisplay(message) {
+    const lines = [];
+    if (message.role === "assistant") {
+        for (const part of message.content) {
+            if (part.type === "text") lines.push(...part.text.split("\n"));
+            else lines.push(`* ${part.name}${argsLine(part.arguments) ? ` ${argsLine(part.arguments)}` : ""}`);
+        }
+        if (message.errorMessage) lines.push(`! ${message.errorMessage}`);
+    } else if (message.role === "toolResult") {
+        const body = contentText(message.content).split("\n").filter(line => line.trim());
+        const shown = body.slice(0, 6).map(line => `    ${oneLine(line, 200)}`);
+        lines.push(`  ${message.isError ? "error" : "result"} ${message.toolName}${body.length ? ":" : " (empty)"}`, ...shown);
+        if (body.length > shown.length) lines.push(`    (${body.length - shown.length} more lines)`);
+    } else {
+        for (const line of contentText(message.content).split("\n")) lines.push(`> ${line}`);
+    }
+    lines.push("");
+    return lines;
+}
+
+function createJobFeed(jobId) {
+    let inflight;
+    const feed = {
+        jobId, cursor: 0, generation: 0, base: 0, bytes: 0, chunks: [], cache: undefined, display: [], liveText: "", seq: 0,
+        status: "running", streamClosed: false, hasMore: false, captureError: "", missing: "", noLog: false,
+        model: "", thinking: "", activity: "running", progress: "",
+    };
+    const show = lines => {
+        feed.display.push(...lines);
+        if (feed.display.length > DISPLAY_MAX_LINES) feed.display.splice(0, feed.display.length - DISPLAY_MAX_LINES);
+    };
+    const append = (type, fields, timestamp = Date.now()) => {
+        const line = `${JSON.stringify({ type, id: `${jobId}:${feed.generation}:${feed.seq++}`, parentId: null, timestamp: new Date(timestamp).toISOString(), ...fields })}\n`;
+        feed.chunks.push(line);
+        feed.bytes += Buffer.byteLength(line, "utf8");
+        feed.cache = undefined;
+    };
+    const observeModel = model => {
+        if (!model || model === feed.model) return;
+        feed.model = model;
+        append("model_change", { model });
+        show([`[model ${model}]`]);
+    };
+    const observeThinking = level => {
+        const value = effectiveThinking(level);
+        if (!value || value === feed.thinking) return;
+        feed.thinking = value;
+        show([`[thinking ${value}]`]);
+    };
+    const reset = () => {
+        feed.generation++;
+        feed.base += feed.bytes + 1;
+        Object.assign(feed, { bytes: 0, chunks: [], cache: undefined, display: [], liveText: "", model: "", thinking: "", activity: "running", progress: "" });
+    };
+    const project = event => {
+        switch (event.type) {
+            case "agent_start":
+                feed.activity = "running";
+                break;
+            case "agent_end":
+                if (event.isTerminal !== false) feed.activity = "idle";
+                feed.liveText = "";
+                break;
+            case "message_start":
+                if (isRecord(event.message) && event.message.role === "assistant") feed.liveText = "";
+                break;
+            case "message_update": {
+                const update = event.assistantMessageEvent;
+                if (isRecord(update) && update.type === "text_delta" && typeof update.delta === "string") feed.liveText = (feed.liveText + update.delta).slice(-LIVE_TEXT_MAX);
+                else if (isRecord(event.message) && event.message.role === "assistant") feed.liveText = contentText(event.message.content).slice(-LIVE_TEXT_MAX);
+                else break;
+                const line = lastTextLine(feed.liveText);
+                if (line) feed.progress = line;
+                break;
+            }
+            case "message_end": {
+                const message = compactMessage(event.message);
+                if (!message) break;
+                if (message.role === "assistant") {
+                    feed.liveText = "";
+                    if (message.provider && message.model) observeModel(`${message.provider}/${message.model}`);
+                    const line = lastTextLine(contentText(message.content));
+                    if (line) feed.progress = line;
+                }
+                append("message", { message }, message.timestamp);
+                show(messageDisplay(message));
+                break;
+            }
+            case "tool_execution_start":
+                if (typeof event.toolName === "string") feed.progress = oneLine(`tool ${event.toolName} ${argsLine(event.args)}`);
+                break;
+            case "model_changed":
+                if (isRecord(event.model) && typeof event.model.provider === "string" && typeof event.model.id === "string") observeModel(`${event.model.provider}/${event.model.id}`);
+                break;
+            case "thinking_level_changed":
+                observeThinking(event.resolved ?? event.thinkingLevel);
+                break;
+        }
+    };
+    const pumpPages = async signal => {
+        for (let pages = 0; pages < PUMP_MAX_PAGES; pages++) {
+            const res = await callSupervisorTool(resolveEndpoint(), "events", { job_id: jobId, after: feed.cursor, limit: EVENTS_PAGE_LIMIT }, { signal, timeoutMs: 30000 });
+            if (!res.ok) {
+                if (/not found|unknown job|no such job/i.test(res.error)) feed.missing = res.error;
+                else if (/no RPC event log/i.test(res.error)) feed.noLog = true;
+                else throw new Error(res.error);
+                return;
+            }
+            const page = parseRecord(res.text);
+            if (!page || !Number.isSafeInteger(page.next_cursor) || !Array.isArray(page.events)) throw new Error("Supervisor returned an invalid event page");
+            if (page.reset === true) reset();
+            else if (page.from_cursor !== feed.cursor) throw new Error("Supervisor returned an event page for a different cursor");
+            for (const row of page.events) if (isRecord(row) && isRecord(row.event)) project(row.event);
+            feed.cursor = page.next_cursor;
+            if (typeof page.status === "string") feed.status = page.status;
+            feed.streamClosed = page.stream_closed === true;
+            feed.hasMore = page.has_more === true;
+            feed.captureError = typeof page.capture_error === "string" ? page.capture_error : "";
+            if (!feed.model && typeof page.model_resolved === "string") observeModel(page.model_resolved);
+            if (typeof page.thinking === "string") observeThinking(page.thinking);
+            if (!feed.hasMore) return;
+        }
+    };
+    feed.pump = signal => {
+        inflight ??= pumpPages(signal).finally(() => { inflight = undefined; });
+        return inflight;
+    };
+    feed.drained = () => isTerminalStatus(feed.status) && feed.streamClosed && !feed.hasMore;
+    feed.readTranscript = async fromByte => {
+        try {
+            await feed.pump();
+        } catch { }
+        if (feed.missing && feed.bytes === 0) return { text: "", newSize: feed.base, error: `The Supervisor no longer knows job ${jobId}: ${feed.missing}` };
+        const start = Number.isSafeInteger(fromByte) && fromByte >= 0 ? fromByte : 0;
+        const newSize = feed.base + feed.bytes;
+        const reset = start < feed.base || start > newSize;
+        feed.cache ??= Buffer.from(feed.chunks.join(""), "utf8");
+        const text = feed.cache.subarray(reset ? 0 : start - feed.base).toString("utf8");
+        return reset ? { text, newSize, reset: true } : { text, newSize };
+    };
+    feed.view = () => (feed.liveText.trim() ? [...feed.display, ...feed.liveText.split("\n")] : feed.display);
+    return feed;
+}
+
+const MECHANISMS = { external: "external agent", hook: "async job hook", fallback: "fallback poller" };
+
+const completionStatus = status => (status === "done" ? "done" : /^cancel/.test(String(status)) ? "cancelled" : "failed");
+
 function createJobTracker(pi) {
     let ctx;
     let timer;
-    let polling = false;
+    let pumping = false;
+    let widgetShown = false;
     const jobs = new Map();
-    const fallback = new Map();
+    const known = new Map();
+    const feeds = new Map();
     const settled = new Set();
 
-    const hookAvailable = () => typeof ctx?.asyncJobs?.register === "function";
+    const mode = () => (typeof ctx?.agents?.registerExternal === "function" ? "external" : typeof ctx?.asyncJobs?.register === "function" ? "hook" : "fallback");
+
+    const feedFor = jobId => {
+        let feed = feeds.get(jobId);
+        if (!feed) {
+            feed = createJobFeed(jobId);
+            feeds.set(jobId, feed);
+        }
+        return feed;
+    };
 
     const append = (state, job, extra = {}) => {
         try {
@@ -457,31 +696,40 @@ function createJobTracker(pi) {
         } catch { }
     };
 
+    const progressLine = job => {
+        const feed = feeds.get(job.jobId);
+        const state = feed?.activity === "idle" ? "idle" : feed?.status || "running";
+        const model = feed?.model || job.model;
+        const thinking = feed?.thinking || job.thinking;
+        return `${state}, ${elapsedLabel(Date.now() - job.startedAt)}${model ? `, ${model}${thinking ? `:${thinking}` : ""}` : ""}${feed?.progress ? `: ${feed.progress}` : ""}`;
+    };
+
     const renderWidget = () => {
         if (!ctx?.hasUI || typeof ctx.ui?.setWidget !== "function") return;
-        if (fallback.size === 0) {
-            ctx.ui.setWidget(WIDGET_KEY, undefined);
+        const shown = [...jobs.values()].filter(job => job.tracking === "fallback");
+        if (shown.length === 0) {
+            if (widgetShown) ctx.ui.setWidget(WIDGET_KEY, undefined);
+            widgetShown = false;
             return;
         }
-        const now = Date.now();
-        const lines = [`Remote jobs running: ${fallback.size}`];
-        for (const job of fallback.values()) {
-            lines.push(`  ${jobLabel(job)}${job.machine ? ` on ${job.machine}` : ""}, ${elapsedLabel(now - job.startedAt)}${job.lastTool ? `, last tool ${job.lastTool}` : ""}`);
-        }
-        ctx.ui.setWidget(WIDGET_KEY, lines);
+        widgetShown = true;
+        ctx.ui.setWidget(WIDGET_KEY, [`Remote jobs running: ${shown.length}`, ...shown.map(job => oneLine(`  ${jobLabel(job)}${job.machine ? ` on ${job.machine}` : ""}, ${progressLine(job)}`, 240))]);
+    };
+
+    const stopTimerIfIdle = () => {
+        if (timer === undefined || [...jobs.values()].some(job => job.tracking !== "hook")) return;
+        ctx?.clearTimer?.(timer);
+        timer = undefined;
     };
 
     const settle = (job, status) => {
         if (settled.has(job.jobId)) return false;
         settled.add(job.jobId);
         jobs.delete(job.jobId);
-        fallback.delete(job.jobId);
-        append("settled", job, { status });
+        job.finalStatus = status;
+        append("settled", job, { status, cursor: feeds.get(job.jobId)?.cursor ?? 0 });
         renderWidget();
-        if (fallback.size === 0 && timer !== undefined) {
-            ctx?.clearTimer?.(timer);
-            timer = undefined;
-        }
+        stopTimerIfIdle();
         return true;
     };
 
@@ -502,8 +750,32 @@ function createJobTracker(pi) {
         if (!res.ok) return { error: res.error, missing: /not found|unknown job|no such job/i.test(res.error) };
         const payload = parseRecord(res.text);
         if (!payload) return { error: "unreadable status" };
-        if (typeof payload.last_tool === "string") job.lastTool = payload.last_tool;
         return { payload };
+    };
+
+    const observe = async (job, signal) => {
+        const feed = feedFor(job.jobId);
+        try {
+            await feed.pump(signal);
+        } catch {
+            return undefined;
+        }
+        if (feed.missing) return { status: "lost", text: `Remote job ${jobLabel(job)} is no longer known to the Supervisor: ${feed.missing}` };
+        if (feed.captureError) {
+            const outcome = await finalReport(job, "error", signal);
+            return { status: "error", failed: true, text: `${outcome.text}\n\nThe Supervisor lost the job's event stream: ${feed.captureError}` };
+        }
+        if (feed.noLog) {
+            const state = await readStatus(job, signal);
+            if (state.missing) return { status: "lost", text: `Remote job ${jobLabel(job)} is no longer known to the Supervisor: ${state.error}` };
+            if (state.payload) {
+                feed.status = state.payload.status || feed.status;
+                if (typeof state.payload.last_tool === "string" && state.payload.last_tool) feed.progress = `tool ${state.payload.last_tool}`;
+                if (isTerminalStatus(state.payload.status)) return finalReport(job, state.payload.status, signal);
+            }
+            return undefined;
+        }
+        return feed.drained() ? finalReport(job, feed.status, signal) : undefined;
     };
 
     const runHookJob = job => async ({ signal, reportProgress }) => {
@@ -513,21 +785,16 @@ function createJobTracker(pi) {
                 settle(job, "canceled");
                 return `Remote job ${jobLabel(job)} canceled.`;
             }
-            const state = await readStatus(job, signal);
-            if (state.missing) {
-                settle(job, "lost");
-                return `Remote job ${jobLabel(job)} is no longer known to the Supervisor: ${state.error}`;
-            }
-            if (state.payload && isTerminalStatus(state.payload.status)) {
-                const outcome = await finalReport(job, state.payload.status);
+            const outcome = await observe(job, signal);
+            if (signal.aborted) continue;
+            if (outcome) {
                 settle(job, outcome.status);
+                if (outcome.failed) throw new Error(outcome.text);
                 return outcome.text;
             }
-            if (state.payload) {
-                try {
-                    await reportProgress(`${state.payload.status}${job.machine ? ` on ${job.machine}` : ""}, ${elapsedLabel(Date.now() - job.startedAt)}${job.lastTool ? `, last tool ${job.lastTool}` : ""}`);
-                } catch { }
-            }
+            try {
+                await reportProgress(progressLine(job));
+            } catch { }
             await abortableSleep(HOOK_POLL_MS, signal);
         }
     };
@@ -537,42 +804,124 @@ function createJobTracker(pi) {
         pi.sendMessage({ customType: RESULT_MESSAGE_TYPE, content: text, display: true, details: { jobId: job.jobId, name: job.name, machine: job.machine, status } }, { deliverAs: "followUp", triggerTurn: true });
     };
 
-    const pollFallback = async () => {
-        if (polling) return;
-        polling = true;
+    const tickExternal = async job => {
+        const outcome = await observe(job);
+        const feed = feedFor(job.jobId);
+        const patch = { status: feed.activity === "idle" ? "idle" : "running" };
+        if (feed.progress) patch.progress = feed.progress;
+        if (feed.model) patch.model = feed.model;
+        if (feed.thinking) patch.thinking = feed.thinking;
+        const signature = JSON.stringify(patch);
+        if (signature !== job.lastPatch) {
+            job.lastPatch = signature;
+            try {
+                job.handle.update(patch);
+            } catch { }
+        }
+        if (!outcome || !settle(job, outcome.status)) return;
         try {
-            for (const job of [...fallback.values()]) {
-                const state = await readStatus(job);
-                if (state.missing) deliver(job, `Remote job ${jobLabel(job)} is no longer known to the Supervisor: ${state.error}`, "lost");
-                else if (state.payload && isTerminalStatus(state.payload.status)) {
-                    const outcome = await finalReport(job, state.payload.status);
-                    deliver(job, outcome.text, outcome.status);
-                }
+            job.handle.complete({ status: outcome.failed ? "failed" : completionStatus(outcome.status), text: outcome.text });
+        } catch { }
+    };
+
+    const pumpAll = async () => {
+        if (pumping) return;
+        pumping = true;
+        try {
+            for (const job of [...jobs.values()]) {
+                if (!jobs.has(job.jobId)) continue;
+                try {
+                    if (job.tracking === "external") await tickExternal(job);
+                    else if (job.tracking === "fallback") {
+                        const outcome = await observe(job);
+                        if (outcome) deliver(job, outcome.text, outcome.status);
+                    }
+                } catch { }
             }
         } finally {
-            polling = false;
+            pumping = false;
             renderWidget();
         }
     };
 
+    const ensureTimer = () => {
+        if (timer === undefined) timer = ctx.setInterval(() => void pumpAll(), PUMP_MS);
+        void pumpAll();
+    };
+
+    const steerJob = async (job, text, steerMode) => {
+        const tool = steerMode === "follow_up" ? "message" : "steer";
+        const sessionId = ctx?.sessionManager?.getSessionId?.();
+        const args = { job_id: job.jobId, text, mode: steerMode === "follow_up" ? "follow_up" : "steer" };
+        if (sessionId) args.sender_session_id = sessionId;
+        const res = await callSupervisorTool(resolveEndpoint(), tool, args, { timeoutMs: 30000 });
+        if (!res.ok) throw new Error(`Supervisor ${tool} failed: ${res.error}`);
+    };
+
+    const cancelJob = async job => {
+        const res = await callSupervisorTool(resolveEndpoint(), "cancel", { job_id: job.jobId }, { timeoutMs: 15000 });
+        if (!res.ok) throw new Error(`Supervisor cancel failed: ${res.error}`);
+    };
+
     const follow = job => {
         if (!ctx || settled.has(job.jobId) || jobs.has(job.jobId)) return;
+        known.set(job.jobId, job);
         jobs.set(job.jobId, job);
-        if (hookAvailable()) {
-            job.tracking = "hook";
-            ctx.asyncJobs.register(`remote ${jobLabel(job)}`, runHookJob(job), { intent: `Remote job ${job.name || job.jobId}${job.machine ? ` on ${job.machine}` : ""}` });
-            return;
+        const how = mode();
+        if (how === "external") {
+            try {
+                const execution = { backend: "supervisor", jobId: job.jobId };
+                if (job.machine) execution.machine = job.machine;
+                if (job.model) execution.model = job.model;
+                if (job.thinking) execution.thinking = job.thinking;
+                job.handle = ctx.agents.registerExternal({
+                    label: job.name || job.jobId,
+                    execution,
+                    readTranscript: fromByte => feedFor(job.jobId).readTranscript(fromByte),
+                    steer: (text, steerMode) => steerJob(job, text, steerMode),
+                    cancel: () => cancelJob(job),
+                });
+                job.agentId = job.handle.id;
+                job.tracking = "external";
+                ensureTimer();
+                return;
+            } catch { }
+        } else if (how === "hook") {
+            try {
+                ctx.asyncJobs.register(`remote ${jobLabel(job)}`, runHookJob(job), { intent: `Remote job ${job.name || job.jobId}${job.machine ? ` on ${job.machine}` : ""}` });
+                job.tracking = "hook";
+                return;
+            } catch { }
         }
         job.tracking = "fallback";
-        fallback.set(job.jobId, job);
-        if (timer === undefined) timer = ctx.setInterval(() => void pollFallback(), FALLBACK_POLL_MS);
+        ensureTimer();
         renderWidget();
     };
 
+    const find = ref => {
+        const wanted = String(ref || "").trim();
+        if (!wanted) return undefined;
+        const lower = wanted.toLowerCase();
+        const matches = [...known.values()].filter(job => job.jobId === wanted || job.agentId === wanted || job.name?.toLowerCase() === lower);
+        const job = matches.length > 0 ? matches[matches.length - 1] : wanted.startsWith("sub_") ? { jobId: wanted, startedAt: Date.now() } : undefined;
+        return job ? { job, feed: feedFor(job.jobId) } : undefined;
+    };
+
     return {
-        mechanism: () => (hookAvailable() ? "async job hook" : "fallback poller"),
+        mechanism: () => MECHANISMS[mode()],
         count: () => jobs.size,
         owns: jobId => jobs.has(jobId),
+        find,
+        list() {
+            if (known.size === 0) return "No remote jobs tracked in this session.";
+            const lines = [`Remote jobs in this session (tracking: ${MECHANISMS[mode()]}):`];
+            for (const job of known.values()) {
+                const live = jobs.has(job.jobId);
+                lines.push(`- ${jobLabel(job)}${job.machine ? ` on ${job.machine}` : ""}: ${live ? progressLine(job) : job.finalStatus || "settled"}${job.agentId ? ` [agent ${job.agentId}]` : ""}`);
+            }
+            lines.push("/supervisor transcript <job id or name> shows a job's transcript.");
+            return lines.join("\n");
+        },
         start(sessionCtx) {
             this.stop();
             ctx = sessionCtx;
@@ -583,10 +932,12 @@ function createJobTracker(pi) {
             const pending = new Map();
             for (const entry of entries) {
                 if (entry?.type !== "custom" || entry.customType !== JOB_ENTRY_TYPE || typeof entry.data?.jobId !== "string") continue;
-                if (entry.data.state === "spawned") pending.set(entry.data.jobId, entry.data);
-                else if (entry.data.state === "settled") {
-                    pending.delete(entry.data.jobId);
-                    settled.add(entry.data.jobId);
+                const data = entry.data;
+                if (data.state === "spawned") pending.set(data.jobId, data);
+                else if (data.state === "settled") {
+                    pending.delete(data.jobId);
+                    settled.add(data.jobId);
+                    known.set(data.jobId, { jobId: data.jobId, name: data.name, machine: data.machine, startedAt: Number(data.startedAt) || Date.now(), finalStatus: data.status });
                 }
             }
             for (const data of pending.values()) {
@@ -596,9 +947,11 @@ function createJobTracker(pi) {
         stop() {
             if (timer !== undefined) ctx?.clearTimer?.(timer);
             timer = undefined;
-            if (fallback.size > 0 && ctx?.hasUI) ctx.ui?.setWidget?.(WIDGET_KEY, undefined);
+            if (widgetShown && ctx?.hasUI) ctx.ui?.setWidget?.(WIDGET_KEY, undefined);
+            widgetShown = false;
             jobs.clear();
-            fallback.clear();
+            known.clear();
+            feeds.clear();
             settled.clear();
             ctx = undefined;
         },
@@ -606,12 +959,87 @@ function createJobTracker(pi) {
             ctx ??= execCtx;
             append("spawned", job);
             follow(job);
+            return job;
         },
         markRead(jobId, status) {
-            const job = fallback.get(jobId);
-            if (job && isTerminalStatus(status)) settle(job, status);
+            const job = jobs.get(jobId);
+            if (job?.tracking === "fallback" && isTerminalStatus(status)) settle(job, status);
         },
     };
+}
+
+function wrapRow(line, width) {
+    const text = String(line).replace(/\t/g, "    ");
+    if (text.length <= width) return [text];
+    const rows = [];
+    for (let i = 0; i < text.length; i += width) rows.push(text.slice(i, i + width));
+    return rows;
+}
+
+async function transcriptCommand(tracker, ref, ctx) {
+    if (!ref) return "Usage: /supervisor transcript <job id or name> (see /supervisor jobs)";
+    const target = tracker.find(ref);
+    if (!target) return `No job in this session matches ${JSON.stringify(ref)}; /supervisor jobs lists them, or pass an exact sub_ id.`;
+    const { job, feed } = target;
+    try {
+        await feed.pump();
+    } catch (error) {
+        return `Reading the transcript of ${jobLabel(job)} failed: ${errorMessage(error)}`;
+    }
+    if (feed.missing) return `The Supervisor no longer knows ${jobLabel(job)}: ${feed.missing}`;
+    if (feed.noLog) return `${jobLabel(job)} has no RPC event log, so there is no transcript to show.`;
+    const header = () => `${jobLabel(job)}${job.machine ? ` on ${job.machine}` : ""}: ${feed.drained() ? feed.status : feed.activity === "idle" ? "idle" : "running"}${feed.model ? `, ${feed.model}${feed.thinking ? `:${feed.thinking}` : ""}` : ""}`;
+    if (!ctx.hasUI || typeof ctx.ui?.custom !== "function") return [`Transcript of ${header()}`, "", ...feed.view().slice(-TRANSCRIPT_TEXT_LINES)].join("\n");
+    await ctx.ui.custom((ui, _theme, _keybindings, done) => {
+        let offset = 0;
+        let height = 10;
+        let closed = false;
+        let refreshing = false;
+        const timer = ctx.setInterval(async () => {
+            if (closed || refreshing || feed.drained()) return;
+            refreshing = true;
+            try {
+                await feed.pump();
+            } catch { }
+            refreshing = false;
+            if (!closed) ui.requestRender();
+        }, TRANSCRIPT_POLL_MS);
+        const close = () => {
+            if (closed) return;
+            closed = true;
+            ctx.clearTimer(timer);
+            done(undefined);
+        };
+        return {
+            render(width) {
+                const w = Math.max(20, width);
+                height = Math.max(3, ui.size().rows - 4);
+                const body = feed.view().flatMap(line => wrapRow(line, w));
+                offset = Math.min(offset, Math.max(0, body.length - height));
+                const end = body.length - offset;
+                const visible = body.slice(Math.max(0, end - height), end);
+                while (visible.length < height) visible.push("");
+                const position = offset > 0 ? `scrolled up ${offset} rows` : feed.drained() ? "ended" : "following live";
+                return [oneLine(header(), w), "-".repeat(Math.min(w, 80)), ...visible, "-".repeat(Math.min(w, 80)), oneLine(`${position}. q/Esc close, Up/Down/PgUp/PgDn scroll, End follow`, w)];
+            },
+            handleInput(data) {
+                if (data === "q" || data === "\x1b" || data === "\x03") return close();
+                if (data === "\x1b[A" || data === "k") offset++;
+                else if (data === "\x1b[B" || data === "j") offset = Math.max(0, offset - 1);
+                else if (data === "\x1b[5~") offset += height;
+                else if (data === "\x1b[6~") offset = Math.max(0, offset - height);
+                else if (data === "\x1b[F" || data === "\x1b[4~" || data === "G") offset = 0;
+                else if (data === "\x1b[H" || data === "\x1b[1~" || data === "g") offset = Number.MAX_SAFE_INTEGER;
+                else return;
+                ui.requestRender();
+            },
+            dispose() {
+                closed = true;
+                ctx.clearTimer(timer);
+            },
+        };
+    }, { overlay: true, fullscreen: true });
+    return undefined;
 }
 
 const REMOTE_DESCRIPTION = [
@@ -623,6 +1051,7 @@ const REMOTE_DESCRIPTION = [
     "- `machines`: configured launch targets; each row's `id` is the exact `spawn.machine` selector. `models`: optional `machine`, `query`, `limit`: that host's roles, fallback chains and model ids.",
     "- `spawn`: `message` is the task. Optional `name` (display only), `machine`, `cwd`, `model`, `thinking`, `maxTime` (default 6h), `sessionId` to resume. Returns the `sub_` job id.",
     "- `status` / `result` / `events`: `to` is the exact `sub_` id; `events` takes `after` and `limit`. `cancel`: `to` kills a running job; `scheduleId` instead drops a queued follow-up.",
+    "- `extend`: `to` + exactly one of `maxTime` (new total limit from job start, e.g. 6h) or `add` (added to the current deadline, e.g. 2h); raises or lowers a running job's time limit.",
     "- `steer` / `message`: `to` + `message` into a RUNNING job; `mode` steer (default) interrupts, aside lands without aborting, follow_up waits for the turn. `schedule`: `to` + `message` queue a prompt that starts once `to` is terminal.",
     "- `jobs`: every retained job, newest first; `limit`, `offset` (continue from `next_offset`). Listing never adopts a job.",
     "- `list`: registered agent sessions (`machineFilter`, `query`, `limit`, `includeGrok`). `agent`: `to` agent id, `includeQueue`, `includeHistory`. `prompt`: `to` agent id + `message`, `mode` (default aside), `waitFor` none|delivered|ack, `waitSeconds`.",
@@ -636,7 +1065,7 @@ const REMOTE_DESCRIPTION = [
 
 function createRemoteTool(pi, tracker, identity) {
     const { Type } = pi.typebox;
-    const ops = ["spawn", "status", "result", "cancel", "steer", "message", "schedule", "events", "jobs", "machines", "models", "list", "agent", "prompt", "sessions", "session"];
+    const ops = ["spawn", "status", "result", "cancel", "steer", "message", "schedule", "extend", "events", "jobs", "machines", "models", "list", "agent", "prompt", "sessions", "session"];
     const str = description => Type.Optional(Type.String({ description }));
     const num = description => Type.Optional(Type.Number({ description }));
     const bool = description => Type.Optional(Type.Boolean({ description }));
@@ -661,7 +1090,8 @@ function createRemoteTool(pi, tracker, identity) {
         cwd: str("spawn/schedule: working directory on the destination; sessions: working-directory substring"),
         model: str("spawn/schedule: model override, interpreted on the destination"),
         thinking: str("spawn/schedule: reasoning effort"),
-        maxTime: str("spawn/schedule: deadline such as 30m or 2h, default 6h"),
+        maxTime: str("spawn/schedule: deadline such as 30m or 2h, default 6h; extend: new total limit from job start"),
+        add: str("extend: time added to the current deadline, such as 2h"),
         sessionId: str("spawn: destination session to resume; session: saved conversation to read"),
     });
 
@@ -730,14 +1160,16 @@ function createRemoteTool(pi, tracker, identity) {
                 const jobId = typeof receipt.job_id === "string" ? receipt.job_id : "";
                 if (!jobId.startsWith("sub_")) return fail(`Supervisor returned no job id: ${res.text}. Inspect the roster before retrying.`, { op });
                 const machine = typeof receipt.machine === "string" && receipt.machine ? receipt.machine : params.machine;
-                tracker.adopt({ jobId, name, machine, startedAt: Date.now() }, ctx);
-                const hook = tracker.mechanism() === "async job hook";
-                const next = hook
-                    ? (ctx.hasUI ? "Its result arrives as a message on its own: end your turn once nothing else is left." : "Its result arrives as a message; once nothing else is left, call `wait` instead of polling.")
-                    : "Its result arrives as a follow-up message when the job ends: end your turn once nothing else is left; do not poll status/result.";
-                const model = receipt.model_resolved || receipt.model;
+                const model = receipt.model_resolved || receipt.model || params.model;
+                const thinking = receipt.thinking || params.thinking;
+                const job = tracker.adopt({ jobId, name, machine, model, thinking, startedAt: Date.now() }, ctx);
+                const next = job.tracking === "external"
+                    ? `It runs as subagent ${job.agentId}: its result arrives on its own, so end your turn or call \`wait\` once nothing else is left.`
+                    : job.tracking === "hook"
+                        ? (ctx.hasUI ? "Its result arrives as a message on its own: end your turn once nothing else is left." : "Its result arrives as a message; once nothing else is left, call `wait` instead of polling.")
+                        : "Its result arrives as a follow-up message when the job ends: end your turn once nothing else is left; do not poll status/result.";
                 const summary = `Spawned ${name} as ${jobId}${machine ? ` on ${machine}` : ""} (status ${receipt.status || "running"}${model ? `, model ${model}` : ""}).`;
-                return { content: [{ type: "text", text: `${summary}\n${next}` }], details: { op, jobId, name, machine, status: receipt.status, model, payload: receipt } };
+                return { content: [{ type: "text", text: `${summary}\n${next}` }], details: { op, jobId, name, machine, status: receipt.status, model, agentId: job.agentId, payload: receipt } };
             }
             if (op === "list") {
                 return call("agents", pick([["machine", params.machineFilter], ["limit", params.limit], ["query", params.query], ["include_grok", params.includeGrok === true ? true : undefined]]), params, signal);
@@ -767,6 +1199,12 @@ function createRemoteTool(pi, tracker, identity) {
                 if (!text) return fail(`${op} requires the text to deliver in message.`, { op, jobId });
                 const { source } = callerSource(ctx);
                 return call(op, pick([["job_id", jobId], ["text", text], ["source", source], ["mode", params.mode], ["sender_session_id", ctx?.sessionManager?.getSessionId?.()]]), params, signal, jobId);
+            }
+            if (op === "extend") {
+                const maxTime = params.maxTime?.trim();
+                const add = params.add?.trim();
+                if (!maxTime === !add) return fail("extend requires exactly one of maxTime (new total limit) or add (added to the current deadline).", { op, jobId });
+                return call("extend", pick([["job_id", jobId], ["max_time", maxTime], ["add", add]]), params, signal, jobId);
             }
             if (op === "schedule") {
                 const queued = params.message?.trim();
@@ -1070,22 +1508,25 @@ export default function supervisorAgent(pi) {
         remoteOwner = "plugin";
     };
     pi.registerCommand("supervisor", {
-        description: "Supervisor plugin: status | hub [listenHost] | target add|list|remove",
-        getArgumentCompletions: prefix => ["status", "hub", "target add", "target list", "target remove"].filter(item => item.startsWith(prefix.trim())).map(value => ({ value, label: value })),
+        description: "Supervisor plugin: status | jobs | transcript <job> | hub [listenHost] | target add|list|remove",
+        getArgumentCompletions: prefix => ["status", "jobs", "transcript", "hub", "target add", "target list", "target remove"].filter(item => item.startsWith(prefix.trim())).map(value => ({ value, label: value })),
         handler: async (args, ctx) => {
             const tokens = String(args || "").trim().split(/\s+/).filter(Boolean);
             const sub = tokens[0] || "status";
             let text;
             try {
                 if (sub === "status") text = await statusCommand(tracker, () => selfIdentity(), () => remoteOwner === "native" ? "native remote tool (this omp ships its own)" : remoteOwner === "plugin" ? "registered by this plugin" : remoteOwner);
+                else if (sub === "jobs") text = tracker.list();
+                else if (sub === "transcript") text = await transcriptCommand(tracker, tokens[1], ctx);
                 else if (sub === "hub") text = await hubCommand(tokens[1]);
                 else if (sub === "target" && tokens[1] === "add") text = await targetAdd(tokens.slice(2), resolveEndpoint());
                 else if (sub === "target" && tokens[1] === "list") text = targetList();
                 else if (sub === "target" && tokens[1] === "remove") text = targetRemove(tokens[2]);
-                else text = "Usage: /supervisor status | /supervisor hub [listenHost] | /supervisor target add <name> <sshHost> [--os linux|darwin|windows] | /supervisor target list | /supervisor target remove <name>";
+                else text = "Usage: /supervisor status | /supervisor jobs | /supervisor transcript <job> | /supervisor hub [listenHost] | /supervisor target add <name> <sshHost> [--os linux|darwin|windows] | /supervisor target list | /supervisor target remove <name>";
             } catch (error) {
                 text = `/supervisor ${sub} failed: ${errorMessage(error)}`;
             }
+            if (text === undefined) return;
             if (ctx.hasUI) pi.sendMessage({ customType: COMMAND_MESSAGE_TYPE, content: text, display: true });
             else process.stdout.write(`${text}\n`);
         },

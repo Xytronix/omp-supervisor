@@ -62,14 +62,19 @@ The hub, clients and spawn targets all run on Windows. The bootstrap uses `super
 
 ## The `remote` tool
 
-The plugin adds a `remote` tool with the ops `spawn`, `status`, `result`, `cancel`, `steer`, `message`, `schedule`, `events`, `jobs`, `machines`, `models`, `list`, `agent`, `prompt`, `sessions` and `session`, mapped onto the Supervisor MCP tools. If omp already ships a native `remote` tool, the plugin leaves it in place.
+The plugin adds a `remote` tool with the ops `spawn`, `status`, `result`, `cancel`, `steer`, `message`, `schedule`, `extend`, `events`, `jobs`, `machines`, `models`, `list`, `agent`, `prompt`, `sessions` and `session`, mapped onto the Supervisor MCP tools. If omp already ships a native `remote` tool, the plugin leaves it in place.
 
-A spawned job is tracked by the session that started it, and its result is delivered automatically:
+`extend` raises or lowers a running job's time limit: pass the job in `to` and exactly one of `maxTime` (new total limit from the job's start, such as `6h`) or `add` (added to the current deadline, such as `2h`).
 
-- When omp offers extensions its background job manager (`ctx.asyncJobs`), each spawn is registered there: it shows up in `wait` and the job list, cancelling it cancels the remote job, and its result arrives like any background job result.
-- Otherwise the plugin polls its running jobs, shows them in a widget, and delivers each result as a follow-up message that starts a new turn. Print mode may exit before a job finishes; read it later with `remote` op `result`.
+A spawned job is tracked by the session that started it, and its result is delivered automatically. How the job appears depends on what the running omp offers extensions; the plugin picks the first that applies:
 
-Tracked job ids are stored in the session, so a resumed session keeps tracking them.
+- **omp versions with `ctx.agents`** (the external-agent API): each job is a real subagent. It appears in the agent roster and HUD, its transcript opens in the transcript viewer and follows the job live, `wait` blocks on it and receives its result once, cancelling it cancels the remote job, and messages sent to it (`agent://<id>`) reach the job as steer or follow-up input.
+- **omp versions with `ctx.asyncJobs`** (the background job hook): each job is a background job. It shows up in `wait` and the job list with a live progress line (current tool or last assistant line, and the model), cancelling it cancels the remote job, and its result arrives like any background job result.
+- **Any other omp**: the plugin polls its running jobs, shows them in a widget with the same live progress line, and delivers each result as a follow-up message that starts a new turn. Print mode may exit before a job finishes; read it later with `remote` op `result`.
+
+In every case, `/supervisor jobs` lists the jobs this session started, and `/supervisor transcript <job id or name>` opens a job's transcript (assistant text, tool calls, shortened tool results, model and thinking changes) in a full-screen view that follows the job live while it runs. Progress and transcripts come from the Supervisor `events` tool.
+
+The session stores only job ids and event cursors, so a resumed session keeps tracking its jobs.
 
 ## Running alongside a standalone client
 

@@ -70,6 +70,7 @@ type Job struct {
 	CWD                      string        `json:"cwd"`
 	Yolo                     bool          `json:"yolo"`
 	MaxTime                  string        `json:"max_time"`
+	Deadline                 time.Time     `json:"deadline,omitempty"`
 	LogPath                  string        `json:"log_path"`
 	Status                   string        `json:"status"`
 	ExitCode                 int           `json:"exit_code"`
@@ -98,12 +99,14 @@ type Job struct {
 	ackMu            sync.Mutex `json:"-"`
 	archiveScheduled bool       `json:"-"`
 
-	cmd         *exec.Cmd          `json:"-"`
-	cancelFn    context.CancelFunc `json:"-"`
-	rpc         *rpcChild          `json:"-"`
-	captureDone chan struct{}      `json:"-"`
-	monitorDone chan struct{}      `json:"-"`
-	recovered   bool               `json:"-"`
+	cmd             *exec.Cmd          `json:"-"`
+	cancelFn        context.CancelFunc `json:"-"`
+	rpc             *rpcChild          `json:"-"`
+	captureDone     chan struct{}      `json:"-"`
+	monitorDone     chan struct{}      `json:"-"`
+	deadlineTimer   *time.Timer        `json:"-"`
+	deadlineMessage string             `json:"-"`
+	recovered       bool               `json:"-"`
 
 	turnObserved       bool      `json:"-"`
 	turnBusy           bool      `json:"-"`
@@ -334,6 +337,7 @@ func (s *JobStore) loadAll() {
 		j.recovered = true
 		s.reconcileRecovered(&j)
 		s.jobs[j.ID] = &j
+		s.armDeadlineLocked(&j)
 	}
 	log.Printf("Loaded %d jobs from %s", len(s.jobs), s.dataDir)
 }
@@ -1042,7 +1046,7 @@ func registerTools(s *server.MCPServer) {
 		mcp.WithString("thinking", mcp.Description("One of the chosen model's levels; omitted = the role or model default (no injected level).")),
 		mcp.WithString("cwd", mcp.Description("Working directory for the child process")),
 		mcp.WithBoolean("yolo", mcp.Description("Auto-approve all tool calls (default: false)")),
-		mcp.WithString("max_time", mcp.Description("Maximum duration (e.g. 600s, 10m, 1h)")),
+		mcp.WithString("max_time", mcp.Description("Maximum duration from the job's start, 1s to 24h (e.g. 600s, 10m, 1h); extend changes it while the job runs")),
 		mcp.WithString("title", mcp.Description("Descriptive title for tracking")),
 		mcp.WithString("session_id", mcp.Description("Resume an existing OMP session by session ID")),
 		mcp.WithString("resume", mcp.Description("Alias for session_id")),
@@ -1095,6 +1099,13 @@ func registerTools(s *server.MCPServer) {
 		mcp.WithString("schedule_id", mcp.Description("Schedule ID returned by schedule: cancels the queued follow-up instead of a job")),
 	)
 	s.AddTool(cancelTool, handleCancel)
+
+	s.AddTool(mcp.NewTool("extend",
+		mcp.WithDescription("Change a running job's time limit. Pass exactly one of max_time (new total limit measured from the job's start) or add (time added to the current deadline). The total must stay within 1s to 24h and the new deadline must be in the future. Returns job_id, max_time and deadline (RFC3339 UTC)."),
+		mcp.WithString("job_id", mcp.Required(), mcp.Description("Job ID returned by run")),
+		mcp.WithString("max_time", mcp.Description("New total limit from the job's start (e.g. 6h, 90m)")),
+		mcp.WithString("add", mcp.Description("Duration added to the current deadline (e.g. 2h, 30m)")),
+	), handleExtend)
 
 	modelsTool := mcp.NewTool("models",
 		mcp.WithDescription("Model selectors valid on one launch target: its role selectors (roles: @role resolves to that selector there), its retry fallback chains (fallback_chains: the models a failing role walks, each entry's :level replacing the requested effort), and its model catalog. Empty query returns providers; query/provider returns selectable IDs with supported thinking levels."),
@@ -1250,6 +1261,19 @@ func startJob(spec jobSpec) (*Job, error) {
 	if remote != nil || spec.Source != nil {
 		spec.Steerable = true
 	}
+	maxTime := spec.MaxTime
+	if maxTime == "" && remote != nil {
+		maxTime = remoteMaxTime
+	}
+	var limit time.Duration
+	ceiling := ""
+	if maxTime != "" {
+		var err error
+		if limit, err = parseMaxTime(maxTime); err != nil {
+			return nil, err
+		}
+		ceiling = maxTimeCeiling
+	}
 	if remote == nil {
 		spec.Machine = localMachineName()
 	}
@@ -1306,7 +1330,7 @@ func startJob(spec jobSpec) (*Job, error) {
 		}
 		remoteInit, err = json.Marshal(map[string]any{
 			"cwd": cwd, "model": modelName, "thinking": thinking,
-			"max_time": spec.MaxTime, "session_id": sessionID, "continue": spec.Continue,
+			"max_time": maxTimeCeiling, "session_id": sessionID, "continue": spec.Continue,
 			"parent_session_id": parentSessionIDForFresh(sessionID, spec.Continue, spec.ParentSessionID),
 			"yolo":              spec.Yolo,
 		})
@@ -1325,7 +1349,7 @@ func startJob(spec jobSpec) (*Job, error) {
 		if parentSessionID != "" && !ompSupportsParentSessionID(ompBin) {
 			parentSessionID = ""
 		}
-		cmdArgs := buildOmpArgs(spec.Prompt, modelName, thinking, cwd, spec.Yolo, spec.MaxTime, sessionID, spec.Continue, shouldAllowHome(cwd), spec.Steerable, parentSessionID)
+		cmdArgs := buildOmpArgs(spec.Prompt, modelName, thinking, cwd, spec.Yolo, ceiling, sessionID, spec.Continue, shouldAllowHome(cwd), spec.Steerable, parentSessionID)
 		cmd = exec.CommandContext(execCtx, ompBin, cmdArgs...)
 		cmd.Dir = cwd
 	}
@@ -1379,7 +1403,7 @@ func startJob(spec jobSpec) (*Job, error) {
 		Title:              title,
 		CWD:                cwd,
 		Yolo:               spec.Yolo,
-		MaxTime:            spec.MaxTime,
+		MaxTime:            maxTime,
 		LogPath:            logPath,
 		Status:             "running",
 		Steerable:          spec.Steerable,
@@ -1441,7 +1465,13 @@ func startJob(spec jobSpec) (*Job, error) {
 		}
 	}
 
+	if limit > 0 {
+		job.Deadline = job.StartTime.Add(limit)
+	}
 	store.add(job)
+	job.mu.Lock()
+	store.armDeadlineLocked(job)
+	job.mu.Unlock()
 	var child *rpcChild
 	if spec.Steerable {
 		job.mu.Lock()
@@ -1467,6 +1497,16 @@ func startJob(spec jobSpec) (*Job, error) {
 		}
 		err := cmd.Wait()
 		close(exited)
+		job.mu.RLock()
+		deadlineMessage := job.deadlineMessage
+		job.mu.RUnlock()
+		if deadlineMessage != "" {
+			if stderrFile != nil {
+				fmt.Fprintln(stderrFile, deadlineMessage)
+			} else {
+				fmt.Fprintln(logFile, deadlineMessage)
+			}
+		}
 		if child != nil {
 			child.close()
 		}
@@ -1733,6 +1773,12 @@ func (j *Job) addExecutionMetadataLocked(out map[string]any) {
 	}
 	if !j.EndTime.IsZero() {
 		out["end_time"] = j.EndTime
+	}
+	if j.MaxTime != "" {
+		out["max_time"] = j.MaxTime
+	}
+	if !j.Deadline.IsZero() {
+		out["deadline"] = j.Deadline.UTC().Format(time.RFC3339)
 	}
 
 	if j.Status == "error" && j.ExitCode == 124 {

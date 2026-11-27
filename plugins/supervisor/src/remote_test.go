@@ -299,6 +299,9 @@ func TestLocalAndRemoteRPCCaptureSurvivesRestart(t *testing.T) {
 			if receipt["machine"] != wantHost || receipt["parent_tool_call_id"] != "parent-call" || receipt["title"] != "Launch worker" || receipt["start_time"] == nil {
 				t.Fatalf("receipt lost resolved destination/linkage: %v", receipt)
 			}
+			if wantMaxTime := map[string]any{"local": nil, "remote": "6h"}[mode]; receipt["max_time"] != wantMaxTime {
+				t.Fatalf("receipt max_time %v, want %v", receipt["max_time"], wantMaxTime)
+			}
 			if model, ok := receipt["model_resolved"]; ok && model != "actual/observed" {
 				t.Fatalf("request advertised as actual model: %v", receipt)
 			}
@@ -381,7 +384,7 @@ func TestSupervisorRPCChildProcess(t *testing.T) {
 			os.Exit(2)
 		}
 		var launch map[string]any
-		if json.Unmarshal(scanner.Bytes(), &launch) != nil || launch["cwd"] != "/remote/home with spaces" || launch["model"] != "provider/requested" || launch["thinking"] != "high" {
+		if json.Unmarshal(scanner.Bytes(), &launch) != nil || launch["cwd"] != "/remote/home with spaces" || launch["model"] != "provider/requested" || launch["thinking"] != "high" || launch["max_time"] != "24h" {
 			os.Exit(3)
 		}
 	}

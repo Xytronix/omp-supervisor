@@ -22,6 +22,8 @@ type jobSummary struct {
 	ContinuedFromJobID string    `json:"continued_from_job_id,omitempty"`
 	ContinuedByJobID   string    `json:"continued_by_job_id,omitempty"`
 	StartTime          time.Time `json:"start_time"`
+	MaxTime            string    `json:"max_time,omitempty"`
+	Deadline           string    `json:"deadline,omitempty"`
 }
 
 type retainedJobsPage struct {
@@ -51,6 +53,10 @@ func (s *JobStore) retainedJobs(limit int, offset int64) retainedJobsPage {
 			SessionID:          job.SessionID,
 			ContinuedFromJobID: job.ContinuedFromJobID,
 			ContinuedByJobID:   job.ContinuedByJobID,
+			MaxTime:            job.MaxTime,
+		}
+		if !job.Deadline.IsZero() {
+			row.Deadline = job.Deadline.UTC().Format(time.RFC3339)
 		}
 		job.mu.RUnlock()
 		if row.Machine == "" {
