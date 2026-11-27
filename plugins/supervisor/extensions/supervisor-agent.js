@@ -69,7 +69,7 @@ function agentPromptSource(source) {
     return out;
 }
 
-const SUPERVISOR_PLUGIN_VERSION = "0.3.0";
+const SUPERVISOR_PLUGIN_VERSION = "0.3.1";
 const SUPERVISOR_RELEASE_REPO = "Xytronix/omp-supervisor";
 const SUPERVISOR_PORT = Number.isSafeInteger(Number(process.env.SUPERVISOR_PORT)) && Number(process.env.SUPERVISOR_PORT) > 0 ? Number(process.env.SUPERVISOR_PORT) : 18200;
 const HOME_DIR = os.homedir();
@@ -1573,7 +1573,12 @@ export default function supervisorAgent(pi) {
             return;
         if (process.env.SUPERVISOR_BOOTSTRAP !== "0" && resolveEndpoint().mode === "hub-local") {
             try {
-                if (await ensureSupervisorService()) writeConnectionConfig();
+                const wasRunning = await supervisorHealthy(localUrl());
+                if (await ensureSupervisorService()) {
+                    writeConnectionConfig();
+                    if (!wasRunning && ctx.hasUI)
+                        ctx.ui?.notify?.("Supervisor service started. The remote tool works now; run /mcp reconnect omp-supervisor:supervisor to load its MCP tools in this session.", "info");
+                }
             } catch { }
         }
         if (generation !== currentGeneration)
