@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -47,9 +48,9 @@ func isProcessAlive(pid int) bool {
 
 func childPathEnv(hasPath bool) string {
 	if !hasPath {
-		return "PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin"
+		return "PATH=" + filepath.Join(homeDir(), ".local", "bin") + ":/usr/local/bin:/usr/bin:/bin"
 	}
-	return "PATH=/home/ubuntu/.local/bin:" + os.Getenv("PATH")
+	return "PATH=" + filepath.Join(homeDir(), ".local", "bin") + ":" + os.Getenv("PATH")
 }
 
 func openNoFollow(p string) (*os.File, error) {

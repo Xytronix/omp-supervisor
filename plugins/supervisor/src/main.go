@@ -378,10 +378,12 @@ func locateOmpBinary() (string, error) {
 	candidates := []string{
 		os.Getenv("OMP_BIN"),
 		os.Getenv("OMP_PATH"),
-		"/home/ubuntu/.local/bin/omp",
-		"/usr/local/bin/omp",
-		"/usr/bin/omp",
+		filepath.Join(homeDir(), ".local", "bin", "omp"),
 	}
+	if p, err := exec.LookPath("omp"); err == nil {
+		candidates = append(candidates, p)
+	}
+	candidates = append(candidates, "/usr/local/bin/omp", "/usr/bin/omp")
 	for _, p := range candidates {
 		if p == "" {
 			continue
@@ -390,10 +392,7 @@ func locateOmpBinary() (string, error) {
 			return p, nil
 		}
 	}
-	if p, err := exec.LookPath("omp"); err == nil {
-		return p, nil
-	}
-	return "", fmt.Errorf("omp binary not found (set OMP_BIN); tried /home/ubuntu/.local/bin/omp")
+	return "", fmt.Errorf("omp binary not found on PATH (set OMP_BIN)")
 }
 
 var ompParentFlagSupport sync.Map
@@ -530,7 +529,7 @@ func isModelRoleSelector(model string) bool {
 func shouldAllowHome(cwd string) bool {
 	homeDir := homeDir()
 	cleanCWD := filepath.Clean(cwd)
-	return cleanCWD == filepath.Clean(homeDir) || cleanCWD == "/home/ubuntu"
+	return cleanCWD == filepath.Clean(homeDir)
 }
 
 func parentSessionIDForFresh(sessionID string, continueFlag bool, parentSessionID string) string {
@@ -605,7 +604,7 @@ func sessionDirCandidates(homeDir, cwd string) []string {
 
 func findSessionFile(homeDir, effectiveCWD, sessionID string, startTime time.Time) string {
 	if homeDir == "" {
-		homeDir = "/home/ubuntu"
+		homeDir, _ = os.UserHomeDir()
 	}
 	sessionsBaseDir := filepath.Join(homeDir, ".omp", "agent", "sessions")
 
@@ -864,7 +863,7 @@ func (j *Job) getReport(maxChars int) (string, bool) {
 	}
 
 	if effectiveCWD == "" {
-		effectiveCWD = "/home/ubuntu"
+		effectiveCWD = homeDir()
 	}
 
 	var reportCandidates []string

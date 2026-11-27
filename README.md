@@ -77,7 +77,7 @@ If `~/.omp/agent/extensions/supervisor-agent.js` exists (the standalone Supervis
 
 ## Configuration
 
-Environment, all optional: `SUPERVISOR_URL` and `SUPERVISOR_TOKEN` (client), `SUPERVISOR_PORT` (local service port, default 18200), `SUPERVISOR_MCP_AUTH` (`auto`, `required`, `off`), `SUPERVISOR_DATA_DIR` (default `~/.omp/supervisor`), `SUPERVISOR_REGISTRY_TOKEN` or `SUPERVISOR_REGISTRY_TOKEN_FILE`, `SUPERVISOR_REMOTE_MACHINES_FILE`, `SUPERVISOR_PUBLIC_BASE_URL` for Grok webhook callbacks, `SUPERVISOR_CAPTURE_FORBIDDEN` to block a path subtree from the capture archive.
+Environment, all optional: `OMP_BIN` (omp used for jobs; default is `~/.local/bin/omp`, then `omp` on PATH, then `/usr/local/bin` and `/usr/bin`), `SUPERVISOR_URL` and `SUPERVISOR_TOKEN` (client), `SUPERVISOR_PORT` (local service port, default 18200), `SUPERVISOR_MCP_AUTH` (`auto`, `required`, `off`), `SUPERVISOR_DATA_DIR` (default `~/.omp/supervisor`), `SUPERVISOR_REGISTRY_TOKEN` or `SUPERVISOR_REGISTRY_TOKEN_FILE`, `SUPERVISOR_REMOTE_MACHINES_FILE`, `SUPERVISOR_PUBLIC_BASE_URL` for Grok webhook callbacks, `SUPERVISOR_CAPTURE_FORBIDDEN` to block a path subtree from the capture archive.
 
 ## Build from source
 

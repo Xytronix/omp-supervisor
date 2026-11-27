@@ -34,7 +34,7 @@ func homeDir() string {
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
 		return h
 	}
-	return "/home/ubuntu"
+	return os.TempDir()
 }
 
 func sessionsBaseDir() string {

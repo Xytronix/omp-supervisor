@@ -3,14 +3,14 @@
   "owner": { "name": "Xytronix" },
   "metadata": {
     "description": "Supervisor: durable remote job control plane for omp sessions",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "omp-supervisor",
       "source": "./plugins/supervisor",
       "description": "Durable supervisor service plus agent bridge: spawn, steer and resume omp jobs across machines, surviving session exits.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "license": "MIT",
       "keywords": ["supervisor", "jobs", "remote", "agents"]
     }
