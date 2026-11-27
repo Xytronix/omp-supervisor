@@ -9,17 +9,75 @@ omp plugin marketplace add Xytronix/omp-supervisor
 omp plugin install omp-supervisor@omp-supervisor
 ```
 
-On first session start the extension downloads the supervisor binary for your platform (linux/darwin, amd64/arm64), verifies its checksum against the release, starts it on `127.0.0.1:18200` and writes `~/.omp/agent/supervisor-connection.json`. Set `SUPERVISOR_URL`/`SUPERVISOR_TOKEN` to point at a remote or already running supervisor instead; local bootstrap then steps aside. `SUPERVISOR_BOOTSTRAP=0` disables bootstrap entirely.
+## Single host
 
-## What you get
+Nothing to configure. On the first interactive session the extension downloads the supervisor binary for your platform (linux, darwin or windows; amd64 or arm64), verifies it against the release `SHA256SUMS`, starts it on `127.0.0.1:18200` and writes `~/.omp/agent/supervisor-connection.json`. Later sessions reuse the running service and start it again if it is gone. `SUPERVISOR_BOOTSTRAP=0` disables bootstrap. Headless sessions (print, RPC, subagents) skip bootstrap and registration unless `SUPERVISOR_AGENT_FORCE=1`.
 
-- MCP tools `run`, `status`, `result`, `steer`, `message`, `prompt`, `jobs`, `events`, `models`, `agents`, `sessions`, `schedule`, `cancel` and more, served by the supervisor at `/mcp`.
-- Interactive registration: your TUI sessions appear in `agents`, and other agents can prompt or steer them while you watch.
-- Finished jobs are reusable: steering or messaging a terminal job continues its session in a fresh job.
+`/supervisor status` shows the mode (`hub-local` or `client`), URL, health, whether `/mcp` requires a token, the token source, the registered agent id, and how remote jobs are tracked.
+
+## Multiple hosts: one hub, many clients
+
+Run the service on one machine (the hub) and point every other omp at it.
+
+On the hub, bind the service to a private address, ideally its Tailscale IP or another address only your machines can reach:
+
+```
+/supervisor hub 100.x.y.z
+```
+
+This saves the listen host, restarts the plugin-started service on it (a service the plugin did not start is left alone), updates the hub's own connection file, and prints the client setup. Restart omp on the hub afterwards. `/supervisor hub` with no argument goes back to loopback.
+
+On each client, copy the hub's token file (`~/.omp/supervisor/registry-token` on the hub, printed by `/supervisor hub`) to a private file, then set two variables in your shell profile:
+
+```sh
+export SUPERVISOR_URL=http://100.x.y.z:18200
+export SUPERVISOR_TOKEN="$(cat ~/.omp/supervisor/hub-token)"
+```
+
+```powershell
+$env:SUPERVISOR_URL = "http://100.x.y.z:18200"
+$env:SUPERVISOR_TOKEN = (Get-Content "$HOME/.omp/supervisor/hub-token" -Raw).Trim()
+```
+
+Environment variables are the supported client mechanism: they reach the plugin's MCP server entry (`${SUPERVISOR_URL}` and `${SUPERVISOR_TOKEN}` in `.mcp.json`), the `remote` tool and session registration. Putting `url` and `token` into `~/.omp/agent/supervisor-connection.json` instead also works today, because the extension exports them before omp connects MCP servers, but it relies on that load order. A client whose `SUPERVISOR_URL` is not its own local hub address never starts a local service.
+
+Auth: with the default `SUPERVISOR_MCP_AUTH=auto`, `/mcp` requires `Authorization: Bearer <registry token>` whenever the service listens on a non-loopback address, and answers 401 otherwise. `/health` stays open. `required` and `off` force it either way. Treat the token like a password: anyone holding it can run jobs on every spawn target. Keep the hub on a private network; never bind `0.0.0.0` on a host with a public interface.
+
+## Spawn targets
+
+The hub runs jobs on other machines over ssh. On the hub:
+
+```
+/supervisor target add mac my-mac
+/supervisor target add win my-windows-box --os windows
+/supervisor target list
+/supervisor target remove mac
+```
+
+`target add` checks key-based `ssh` (BatchMode), finds `node` on the target (Node 18 or newer, Windows included), copies the bundled `omp-rpc-host.mjs` to `~/.omp/agent/` (`%USERPROFILE%\.omp\agent\` on Windows), adds or replaces the entry in `~/.omp/supervisor/machines.json` (or `SUPERVISOR_REMOTE_MACHINES_FILE`), and confirms the Supervisor lists it. The target needs omp installed (`~/.local/bin/omp`, `%LOCALAPPDATA%\omp\omp.exe`, or `OMP_BIN`). Spawn there with `remote` op `spawn` and `machine` set to the name.
+
+## Windows
+
+The hub, clients and spawn targets all run on Windows. The bootstrap uses `supervisor-windows-amd64.exe` or `supervisor-windows-arm64.exe` and starts it without a console window. For a Windows spawn target, enable the OpenSSH server and install Node.js and omp on it.
+
+## The `remote` tool
+
+The plugin adds a `remote` tool with the ops `spawn`, `status`, `result`, `cancel`, `steer`, `message`, `schedule`, `events`, `jobs`, `machines`, `models`, `list`, `agent`, `prompt`, `sessions` and `session`, mapped onto the Supervisor MCP tools. If omp already ships a native `remote` tool, the plugin leaves it in place.
+
+A spawned job is tracked by the session that started it, and its result is delivered automatically:
+
+- When omp offers extensions its background job manager (`ctx.asyncJobs`), each spawn is registered there: it shows up in `wait` and the job list, cancelling it cancels the remote job, and its result arrives like any background job result.
+- Otherwise the plugin polls its running jobs, shows them in a widget, and delivers each result as a follow-up message that starts a new turn. Print mode may exit before a job finishes; read it later with `remote` op `result`.
+
+Tracked job ids are stored in the session, so a resumed session keeps tracking them.
+
+## Running alongside a standalone client
+
+If `~/.omp/agent/extensions/supervisor-agent.js` exists (the standalone Supervisor client used by fork builds of omp), the plugin stays inactive and shows one warning, because both would register the session and deliver messages twice. Delete that file or uninstall the plugin.
 
 ## Configuration
 
-Environment, all optional: `FASTMCP_PORT` (default 8000 upstream, 18200 in the plugin bootstrap), `SUPERVISOR_DATA_DIR` (default `~/.omp/supervisor`), `SUPERVISOR_REGISTRY_TOKEN` or `SUPERVISOR_REGISTRY_TOKEN_FILE` for enrollment, `SUPERVISOR_PUBLIC_BASE_URL` for Grok webhook callbacks, `SUPERVISOR_CAPTURE_FORBIDDEN` to block a path subtree from the capture archive. The service binds loopback by default; `FASTMCP_HOST=0.0.0.0` opts into remote access. The MCP endpoint is unauthenticated job control: never expose it on an untrusted network.
+Environment, all optional: `SUPERVISOR_URL` and `SUPERVISOR_TOKEN` (client), `SUPERVISOR_PORT` (local service port, default 18200), `SUPERVISOR_MCP_AUTH` (`auto`, `required`, `off`), `SUPERVISOR_DATA_DIR` (default `~/.omp/supervisor`), `SUPERVISOR_REGISTRY_TOKEN` or `SUPERVISOR_REGISTRY_TOKEN_FILE`, `SUPERVISOR_REMOTE_MACHINES_FILE`, `SUPERVISOR_PUBLIC_BASE_URL` for Grok webhook callbacks, `SUPERVISOR_CAPTURE_FORBIDDEN` to block a path subtree from the capture archive.
 
 ## Build from source
 

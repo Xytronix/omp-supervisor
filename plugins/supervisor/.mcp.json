@@ -2,7 +2,10 @@
   "mcpServers": {
     "supervisor": {
       "type": "http",
-      "url": "http://127.0.0.1:18200/mcp",
+      "url": "${SUPERVISOR_URL:-http://127.0.0.1:18200}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SUPERVISOR_TOKEN:-}"
+      },
       "timeout": 60000
     }
   }

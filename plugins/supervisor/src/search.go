@@ -31,6 +31,9 @@ func homeDir() string {
 	if h := os.Getenv("HOME"); h != "" {
 		return h
 	}
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
 	return "/home/ubuntu"
 }
 

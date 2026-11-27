@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -1363,7 +1362,7 @@ func hashFile(p string) (string, int64, error) {
 }
 
 func openRegular(p string) (*os.File, error) {
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := openNoFollow(p)
 	if err != nil {
 		return nil, err
 	}

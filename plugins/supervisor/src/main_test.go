@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -857,9 +856,7 @@ func TestActiveProcessCancellation(t *testing.T) {
 
 	execCtx, cancelFn := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(execCtx, "sleep", "60")
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	configureChildProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start mock sleep process: %v", err)
 	}

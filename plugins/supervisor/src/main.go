@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -368,29 +366,6 @@ func (s *JobStore) reconcileRecovered(j *Job) {
 	s.save(j)
 }
 
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	defer process.Release()
-	if err := process.Signal(syscall.Signal(0)); err != nil {
-
-		return !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH)
-	}
-
-	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
-
-		if end := strings.LastIndexByte(string(data), ')'); end >= 0 && end+2 < len(data) && data[end+2] == 'Z' {
-			return false
-		}
-	}
-	return true
-}
-
 func generateJobID() string {
 	bytes := make([]byte, 4)
 	if _, err := rand.Read(bytes); err != nil {
@@ -451,10 +426,7 @@ func ompSupportsParentSessionID(bin string) bool {
 func resolveJobCwd(raw string) (string, error) {
 	cwd := raw
 	if cwd == "" {
-		cwd = os.Getenv("HOME")
-		if cwd == "" {
-			cwd = "/home/ubuntu"
-		}
+		cwd = homeDir()
 	}
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
@@ -556,10 +528,7 @@ func isModelRoleSelector(model string) bool {
 }
 
 func shouldAllowHome(cwd string) bool {
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		homeDir = "/home/ubuntu"
-	}
+	homeDir := homeDir()
 	cleanCWD := filepath.Clean(cwd)
 	return cleanCWD == filepath.Clean(homeDir) || cleanCWD == "/home/ubuntu"
 }
@@ -727,10 +696,7 @@ func (j *Job) refreshSessionMetadata() {
 		j.SessionMetadataFinalized = true
 	}
 
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		homeDir = "/home/ubuntu"
-	}
+	homeDir := homeDir()
 
 	effectiveCWD := j.CWD
 	if effectiveCWD == "" {
@@ -1365,10 +1331,7 @@ func startJob(spec jobSpec) (*Job, error) {
 		cmd.Dir = cwd
 	}
 
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		homeDir = "/home/ubuntu"
-	}
+	homeDir := homeDir()
 	env := os.Environ()
 	hasHome := false
 	hasPath := false
@@ -1383,17 +1346,13 @@ func startJob(spec jobSpec) (*Job, error) {
 	if !hasHome {
 		env = append(env, "HOME="+homeDir)
 	}
-	if !hasPath {
-		env = append(env, "PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin")
-	} else {
-		env = append(env, "PATH=/home/ubuntu/.local/bin:"+os.Getenv("PATH"))
+	if p := childPathEnv(hasPath); p != "" {
+		env = append(env, p)
 	}
 
 	env = append(env, ompModelPolicyEnv)
 	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	configureChildProcess(cmd)
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
@@ -1584,14 +1543,14 @@ func reapAfterStdinEOF(jobID string, pid int, stdinClosed <-chan struct{}, exite
 	case <-time.After(grace):
 	}
 	log.Printf("job %s: RPC child still running %s after stdin EOF; sending SIGTERM", jobID, grace)
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	terminateProcessGroup(pid)
 	select {
 	case <-exited:
 		return
 	case <-time.After(5 * time.Second):
 	}
 	log.Printf("job %s: RPC child ignored SIGTERM; sending SIGKILL", jobID)
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	killProcessGroup(pid)
 }
 
 func handleRun(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1902,7 +1861,7 @@ func handleCancel(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallTo
 
 	if pid > 0 {
 
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		terminateProcessGroup(pid)
 
 		exited := false
 		for i := 0; i < 20; i++ {
@@ -1914,7 +1873,7 @@ func handleCancel(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallTo
 		}
 
 		if !exited && isProcessAlive(pid) {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			killProcessGroup(pid)
 		}
 	}
 
@@ -1943,11 +1902,31 @@ func handleCancel(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallTo
 	return mcp.NewToolResultText(string(jsonBytes)), nil
 }
 
+func newHTTPMux(mcpHandler http.Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcpHandler)
+
+	mux.HandleFunc("POST /api/agents/callback/{id}", handleGrokCallback)
+	mux.Handle("/api/agents/", globalAgents.registryMux())
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"healthy","service":"supervisor"}`))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"name":"Supervisor","version":"1.0.0","tools":["run","machines","status","result","events","jobs","ack_capture","restore_capture","cancel","models","sessions","session","steer","message","schedule","agents","agent","prompt"],"registry":"/api/agents/register"}`))
+	})
+	return mux
+}
+
 func main() {
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		homeDir = "/home/ubuntu"
-	}
+	homeDir := homeDir()
 	baseDir := os.Getenv("SUPERVISOR_DATA_DIR")
 	if baseDir == "" {
 		baseDir = filepath.Join(homeDir, ".omp", "supervisor")
@@ -2008,25 +1987,17 @@ func main() {
 
 	streamableServer := server.NewStreamableHTTPServer(mcpServer, server.WithStateLess(true))
 
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", streamableServer)
-
-	mux.HandleFunc("POST /api/agents/callback/{id}", handleGrokCallback)
-	mux.Handle("/api/agents/", globalAgents.registryMux())
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"healthy","service":"supervisor"}`))
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"name":"Supervisor","version":"1.0.0","tools":["run","machines","status","result","events","jobs","ack_capture","restore_capture","cancel","models","sessions","session","steer","message","schedule","agents","agent","prompt"],"registry":"/api/agents/register"}`))
-	})
+	mcpAuthMode := os.Getenv("SUPERVISOR_MCP_AUTH")
+	mcpHandler, authRequired, err := gateMCPHandler(streamableServer, mcpAuthMode, host, globalAgents.auth)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if authRequired {
+		log.Printf("MCP auth: required (SUPERVISOR_MCP_AUTH=%s, listen host %s); /mcp needs Authorization: Bearer <registry token>", mcpAuthModeLabel(mcpAuthMode), host)
+	} else {
+		log.Printf("MCP auth: off (SUPERVISOR_MCP_AUTH=%s, listen host %s); /mcp is unauthenticated", mcpAuthModeLabel(mcpAuthMode), host)
+	}
+	mux := newHTTPMux(mcpHandler)
 
 	addr := fmt.Sprintf("%s:%s", host, port)
 	log.Printf("Starting Supervisor MCP Server on %s (mcp at /mcp)", addr)
