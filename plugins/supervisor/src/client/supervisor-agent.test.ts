@@ -18,7 +18,7 @@ test("interactive registration, delivery deduplication and lifecycle cleanup", a
   if(p.endsWith("/ack"))acks.push(JSON.parse(opts.body));
   return Response.json({ok:true});
  };
- const pi={on:(event,fn)=>hooks.set(event,fn),sendUserMessage:(text,options)=>{injected.push({text,...options});finishTurn(text);},sendMessage:(message,options)=>{custom.push({message,options});finishTurn(message.details.message);},sendIrc:(...args)=>previews.push(args),getSessionName:()=>"smoke"};
+ const pi={on:(event,fn)=>hooks.set(event,fn),registerCommand(){},sendUserMessage:(text,options)=>{injected.push({text,...options});finishTurn(text);},sendMessage:(message,options)=>{custom.push({message,options});finishTurn(message.details.message);},sendIrc:(...args)=>previews.push(args),getSessionName:()=>"smoke"};
  const ctx={hasUI:true,cwd:"/test",sessionManager:{getSessionId:()=>"test-session"},ui:{notify(){}},isIdle:()=>true,
   setTimeout:(fn,delay)=>{let id=++next;timers.set(id,{fn,interval:false});return id;},
   setInterval:(fn,delay)=>{let id=++next;timers.set(id,{fn,interval:true});return id;},clearTimer:id=>timers.delete(id)};
@@ -46,7 +46,7 @@ test("invalid agent source is not delivered as a human prompt", async()=>{
   if(p.endsWith("/ack"))acks.push(JSON.parse(opts.body));
   return Response.json({ok:true});
  };
- const pi={on:(event,fn)=>hooks.set(event,fn),sendUserMessage:(text,options)=>injected.push({text,...options}),sendMessage:(message,options)=>custom.push({message,options}),sendIrc(){},getSessionName:()=>"smoke"};
+ const pi={on:(event,fn)=>hooks.set(event,fn),registerCommand(){},sendUserMessage:(text,options)=>injected.push({text,...options}),sendMessage:(message,options)=>custom.push({message,options}),sendIrc(){},getSessionName:()=>"smoke"};
  const ctx={hasUI:true,cwd:"/test",sessionManager:{getSessionId:()=>"test-session"},ui:{notify(){}},isIdle:()=>true,
   setTimeout:(fn)=>{let id=++next;timers.set(id,{fn,interval:false});return id;},
   setInterval:(fn)=>{let id=++next;timers.set(id,{fn,interval:true});return id;},clearTimer:id=>timers.delete(id)};
@@ -65,7 +65,7 @@ test("refuses Supervisor deliveries addressed to this session and stamps the sen
   if(p.endsWith("/register"))return Response.json({agent_id:"agt_self",agent_token:"agent-token"});
   return Response.json({deliveries:[]});
  };
- const pi={on:(event,fn)=>hooks.set(event,fn),sendUserMessage(){},sendMessage(){},sendIrc(){},getSessionName:()=>"smoke"};
+ const pi={on:(event,fn)=>hooks.set(event,fn),registerCommand(){},sendUserMessage(){},sendMessage(){},sendIrc(){},getSessionName:()=>"smoke"};
  const ctx={hasUI:true,cwd:"/test",sessionManager:{getSessionId:()=>"sess-self"},ui:{notify(){}},isIdle:()=>true,
   setTimeout:(fn)=>{let id=++next;timers.set(id,{fn,interval:false});return id;},
   setInterval:(fn)=>{let id=++next;timers.set(id,{fn,interval:true});return id;},clearTimer:id=>timers.delete(id)};

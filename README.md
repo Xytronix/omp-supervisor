@@ -25,7 +25,7 @@ On the hub, bind the service to a private address, ideally its Tailscale IP or a
 /supervisor hub 100.x.y.z
 ```
 
-This saves the listen host, restarts the plugin-started service on it (a service the plugin did not start is left alone), updates the hub's own connection file, and prints the client setup. Restart omp on the hub afterwards. `/supervisor hub` with no argument goes back to loopback.
+This saves the listen host, restarts the plugin-started service on it (a service the plugin did not start is left alone), updates the hub's own connection file, and prints the client setup. Restart omp on the hub afterwards. `/supervisor hub` with no argument goes back to loopback. `/supervisor hub` and `/supervisor target` are hub-admin commands: on a client of another hub they refuse and change nothing.
 
 On each client, copy the hub's token file (`~/.omp/supervisor/registry-token` on the hub, printed by `/supervisor hub`) to a private file, then set two variables in your shell profile:
 
@@ -62,7 +62,7 @@ The hub, clients and spawn targets all run on Windows. The bootstrap uses `super
 
 ## The `remote` tool
 
-The plugin adds a `remote` tool with the ops `spawn`, `status`, `result`, `cancel`, `steer`, `message`, `schedule`, `extend`, `events`, `jobs`, `machines`, `models`, `list`, `agent`, `prompt`, `sessions` and `session`, mapped onto the Supervisor MCP tools. If omp already ships a native `remote` tool, the plugin leaves it in place.
+The plugin adds a `remote` tool with the ops `spawn`, `status`, `result`, `cancel`, `steer`, `message`, `schedule`, `extend`, `events`, `jobs`, `machines`, `models`, `list`, `agent`, `prompt`, `sessions` and `session`, mapped onto the Supervisor MCP tools. If omp already ships a native `remote` tool, the plugin leaves it in place and keeps its own job tracking off, because omp tracks those jobs itself; `/supervisor jobs` then lists this session's jobs read-only from the hub.
 
 `extend` raises or lowers a running job's time limit: pass the job in `to` and exactly one of `maxTime` (new total limit from the job's start, such as `6h`) or `add` (added to the current deadline, such as `2h`).
 
@@ -72,7 +72,7 @@ A spawned job is tracked by the session that started it, and its result is deliv
 - **omp versions with `ctx.asyncJobs`** (the background job hook): each job is a background job. It shows up in `wait` and the job list with a live progress line (current tool or last assistant line, and the model), cancelling it cancels the remote job, and its result arrives like any background job result.
 - **Any other omp**: the plugin polls its running jobs, shows them in a widget with the same live progress line, and delivers each result as a follow-up message that starts a new turn. Print mode may exit before a job finishes; read it later with `remote` op `result`.
 
-In every case, `/supervisor jobs` lists the jobs this session started, and `/supervisor transcript <job id or name>` opens a job's transcript (assistant text, tool calls, shortened tool results, model and thinking changes) in a full-screen view that follows the job live while it runs. Progress and transcripts come from the Supervisor `events` tool.
+In every case, `/supervisor jobs` lists the jobs this session started, and `/supervisor transcript <job id or name>` opens a job's transcript (assistant text, tool calls, shortened tool results, model and thinking changes) in a full-screen view that follows the job live while it runs. Progress and transcripts come from the Supervisor `events` tool. `/supervisor status` shows the mode, URL and MCP endpoint with their sources, who owns `remote`, and which job tracking is active.
 
 The session stores only job ids and event cursors, so a resumed session keeps tracking its jobs.
 
@@ -82,7 +82,7 @@ If `~/.omp/agent/extensions/supervisor-agent.js` exists (the standalone Supervis
 
 ## Configuration
 
-Environment, all optional: `OMP_BIN` (omp used for jobs; default is `~/.local/bin/omp`, then `omp` on PATH, then `/usr/local/bin` and `/usr/bin`), `SUPERVISOR_URL` and `SUPERVISOR_TOKEN` (client), `SUPERVISOR_PORT` (local service port, default 18200), `SUPERVISOR_MCP_AUTH` (`auto`, `required`, `off`), `SUPERVISOR_DATA_DIR` (default `~/.omp/supervisor`), `SUPERVISOR_REGISTRY_TOKEN` or `SUPERVISOR_REGISTRY_TOKEN_FILE`, `SUPERVISOR_REMOTE_MACHINES_FILE`, `SUPERVISOR_PUBLIC_BASE_URL` for Grok webhook callbacks, `SUPERVISOR_CAPTURE_FORBIDDEN` to block a path subtree from the capture archive, `SUPERVISOR_CAPTURE_COALESCE_MS` (default 1000; keeps at most one tool progress snapshot per tool call per window in job captures, `0` for a byte-exact capture), `SUPERVISOR_CAPTURE_COMPRESS` (default on; finished captures become `<job_id>.log.gz`, read transparently by `events`, `0` disables).
+Environment, all optional: `OMP_BIN` (omp used for jobs; default is `~/.local/bin/omp`, then `omp` on PATH, then `/usr/local/bin` and `/usr/bin`), `SUPERVISOR_URL` and `SUPERVISOR_TOKEN` (client; they win over `url` and `token` in `~/.omp/agent/supervisor-connection.json`), `SUPERVISOR_MCP_URL` (MCP endpoint for `remote` and `/supervisor`; otherwise omp's `supervisor.mcpUrl` setting, then `<url>/mcp`; the registry token is sent only when the endpoint is on the hub's own origin), `SUPERVISOR_PORT` (local service port, default 18200), `SUPERVISOR_MCP_AUTH` (`auto`, `required`, `off`), `SUPERVISOR_DATA_DIR` (default `~/.omp/supervisor`), `SUPERVISOR_REGISTRY_TOKEN` or `SUPERVISOR_REGISTRY_TOKEN_FILE`, `SUPERVISOR_REMOTE_MACHINES_FILE`, `SUPERVISOR_PUBLIC_BASE_URL` for Grok webhook callbacks, `SUPERVISOR_CAPTURE_FORBIDDEN` to block a path subtree from the capture archive, `SUPERVISOR_CAPTURE_COALESCE_MS` (default 1000; keeps at most one tool progress snapshot per tool call per window in job captures, `0` for a byte-exact capture), `SUPERVISOR_CAPTURE_COMPRESS` (default on; finished captures become `<job_id>.log.gz`, read transparently by `events`, `0` disables).
 
 ## Build from source
 

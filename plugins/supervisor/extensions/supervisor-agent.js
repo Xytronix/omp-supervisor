@@ -69,16 +69,24 @@ function agentPromptSource(source) {
     return out;
 }
 
-const SUPERVISOR_PLUGIN_VERSION = "0.3.2";
+const SUPERVISOR_PLUGIN_VERSION = "0.3.3";
 const SUPERVISOR_RELEASE_REPO = "Xytronix/omp-supervisor";
+const DEFAULT_HUB_URL = "";
 const SUPERVISOR_PORT = Number.isSafeInteger(Number(process.env.SUPERVISOR_PORT)) && Number(process.env.SUPERVISOR_PORT) > 0 ? Number(process.env.SUPERVISOR_PORT) : 18200;
-const HOME_DIR = os.homedir();
-const AGENT_DIR = path.join(HOME_DIR, ".omp", "agent");
-const SUPERVISOR_HOME = path.join(HOME_DIR, ".omp", "supervisor");
-const CONNECTION_PATH = path.join(AGENT_DIR, "supervisor-connection.json");
-const HUB_CONFIG_PATH = path.join(SUPERVISOR_HOME, "plugin-hub.json");
-const SERVICE_STATE_PATH = path.join(SUPERVISOR_HOME, "plugin-service.json");
-const LOOSE_COPY_PATH = path.join(AGENT_DIR, "extensions", "supervisor-agent.js");
+const homeDir = () => os.homedir();
+const agentDir = () => path.join(homeDir(), ".omp", "agent");
+const supervisorHome = () => path.join(homeDir(), ".omp", "supervisor");
+const connectionPath = () => path.join(agentDir(), "supervisor-connection.json");
+const hubConfigPath = () => path.join(supervisorHome(), "plugin-hub.json");
+const serviceStatePath = () => path.join(supervisorHome(), "plugin-service.json");
+const looseCopyPath = () => path.join(agentDir(), "extensions", "supervisor-agent.js");
+const RUNS_AS_PLUGIN = (() => {
+    try {
+        return existsSync(fileURLToPath(new URL("../.omp-plugin/plugin.json", import.meta.url)));
+    } catch {
+        return false;
+    }
+})();
 const RPC_HOST_SOURCE = fileURLToPath(new URL("../src/client/omp-rpc-host.mjs", import.meta.url));
 const RESULT_MAX_CHARS = 8000;
 const REMOTE_JOB_DEFAULT_MAX_TIME = "6h";
@@ -97,10 +105,24 @@ const TOOL_RESULT_MAX_CHARS = 2000;
 const LIVE_TEXT_MAX = 4000;
 const DISPLAY_MAX_LINES = 5000;
 const TRANSCRIPT_TEXT_LINES = 200;
-const USER_ENV = (globalThis[Symbol.for("omp-supervisor.user-env")] ??= {
-    url: String(process.env.SUPERVISOR_URL || "").trim(),
-    token: String(process.env.SUPERVISOR_TOKEN || "").trim(),
-});
+const EXPORTED_ENV = (globalThis[Symbol.for("omp-supervisor.exported-env")] ??= {});
+function userEnv(name) {
+    const value = String(process.env[name] || "").trim();
+    return value && value !== EXPORTED_ENV[name] ? value : "";
+}
+let ompSupervisorMcpUrl = () => "";
+function readOmpSupervisorMcpUrl(pi) {
+    for (const layer of ["getProjectSettings", "getGlobalSettings"]) {
+        try {
+            const raw = pi?.pi?.settings?.[layer]?.();
+            const value = raw?.supervisor?.mcpUrl ?? raw?.["supervisor.mcpUrl"];
+            if (typeof value === "string" && value.trim()) return value.trim();
+        } catch { }
+    }
+    return "";
+}
+const HUB_JOBS_PAGE_LIMIT = 200;
+const HUB_JOBS_MAX_PAGES = 10;
 
 const errorMessage = error => error instanceof Error ? error.message : String(error);
 const trimSlash = value => String(value || "").trim().replace(/\/+$/, "");
@@ -127,7 +149,7 @@ function writeJsonFile(file, value) {
 }
 
 function dataDir() {
-    return String(process.env.SUPERVISOR_DATA_DIR || "").trim() || SUPERVISOR_HOME;
+    return String(process.env.SUPERVISOR_DATA_DIR || "").trim() || supervisorHome();
 }
 
 function tokenFilePath() {
@@ -135,7 +157,7 @@ function tokenFilePath() {
 }
 
 function machinesFilePath() {
-    return String(process.env.SUPERVISOR_REMOTE_MACHINES_FILE || "").trim() || path.join(SUPERVISOR_HOME, "machines.json");
+    return String(process.env.SUPERVISOR_REMOTE_MACHINES_FILE || "").trim() || path.join(supervisorHome(), "machines.json");
 }
 
 function readLocalToken() {
@@ -150,7 +172,7 @@ function readLocalToken() {
 
 function hubListenHost() {
     try {
-        const host = readJsonObject(HUB_CONFIG_PATH)?.listenHost;
+        const host = readJsonObject(hubConfigPath())?.listenHost;
         if (typeof host === "string" && host.trim()) return host.trim();
     } catch { }
     return "127.0.0.1";
@@ -172,7 +194,7 @@ function localUrl() {
 
 function readConnection() {
     try {
-        return { connection: readJsonObject(CONNECTION_PATH) ?? {}, invalid: false };
+        return { connection: readJsonObject(connectionPath()) ?? {}, invalid: false };
     } catch {
         return { connection: {}, invalid: true };
     }
@@ -182,24 +204,44 @@ function resolveEndpoint() {
     const { connection, invalid } = readConnection();
     const local = localUrl();
     const configured = typeof connection.url === "string" ? trimSlash(connection.url) : "";
-    const url = trimSlash(USER_ENV.url || configured || local);
-    const mode = url === local ? "hub-local" : "client";
-    let token = USER_ENV.token, tokenSource = token ? "SUPERVISOR_TOKEN" : "";
+    const urlSource = userEnv("SUPERVISOR_URL") ? "SUPERVISOR_URL" : configured ? connectionPath() : DEFAULT_HUB_URL ? "built-in default" : "local hub";
+    const url = trimSlash(userEnv("SUPERVISOR_URL") || configured || DEFAULT_HUB_URL || local);
+    const mode = !DEFAULT_HUB_URL && url === local ? "hub-local" : "client";
+    let token = userEnv("SUPERVISOR_TOKEN"), tokenSource = token ? "SUPERVISOR_TOKEN" : "";
     if (!token && typeof connection.token === "string" && connection.token.trim()) {
         token = connection.token.trim();
-        tokenSource = CONNECTION_PATH;
+        tokenSource = connectionPath();
     }
     if (!token && mode === "hub-local") {
         token = readLocalToken();
         if (token) tokenSource = process.env.SUPERVISOR_REGISTRY_TOKEN ? "SUPERVISOR_REGISTRY_TOKEN" : tokenFilePath();
     }
-    return { url, token, tokenSource, mode, local, connection, invalid };
+    const [mcpSource, mcpValue] = [
+        ["SUPERVISOR_MCP_URL", String(process.env.SUPERVISOR_MCP_URL || "").trim()],
+        ["omp setting supervisor.mcpUrl", ompSupervisorMcpUrl()],
+        ["hub url", `${url}/mcp`],
+    ].find(([, value]) => value);
+    const mcpUrl = trimSlash(mcpValue);
+    const mcpToken = sameOrigin(mcpUrl, url) ? token : "";
+    return { url, urlSource, token, tokenSource, mode, local, connection, invalid, mcpUrl, mcpSource, mcpToken };
+}
+
+function sameOrigin(a, b) {
+    try {
+        return new URL(a).origin === new URL(b).origin;
+    } catch {
+        return false;
+    }
+}
+
+function mcpBaseUrl(endpoint) {
+    return endpoint.mcpUrl.replace(/\/mcp$/, "");
 }
 
 function exportClientEnv() {
     const endpoint = resolveEndpoint();
-    if (!USER_ENV.url) process.env.SUPERVISOR_URL = endpoint.url;
-    if (!USER_ENV.token && endpoint.token) process.env.SUPERVISOR_TOKEN = endpoint.token;
+    if (!userEnv("SUPERVISOR_URL")) process.env.SUPERVISOR_URL = EXPORTED_ENV.SUPERVISOR_URL = endpoint.url;
+    if (!userEnv("SUPERVISOR_TOKEN") && endpoint.token) process.env.SUPERVISOR_TOKEN = EXPORTED_ENV.SUPERVISOR_TOKEN = endpoint.token;
 }
 
 function supervisorAssetName() {
@@ -225,7 +267,7 @@ async function supervisorHealthy(url = localUrl()) {
 }
 
 function supervisorBinDir() {
-    const dir = path.join(SUPERVISOR_HOME, "bin");
+    const dir = path.join(supervisorHome(), "bin");
     mkdirSync(dir, { recursive: true });
     return dir;
 }
@@ -273,7 +315,7 @@ async function ensureSupervisorBinary() {
 
 function readServiceState() {
     try {
-        const state = readJsonObject(SERVICE_STATE_PATH);
+        const state = readJsonObject(serviceStatePath());
         return state && Number.isSafeInteger(state.pid) && state.pid > 0 ? state : undefined;
     } catch {
         return undefined;
@@ -300,18 +342,18 @@ function pluginOwnsProcess(state) {
 }
 
 function spawnSupervisor(binary, listenHost) {
-    mkdirSync(SUPERVISOR_HOME, { recursive: true });
-    const log = openSync(path.join(SUPERVISOR_HOME, "plugin-service.log"), "a");
+    mkdirSync(supervisorHome(), { recursive: true });
+    const log = openSync(path.join(supervisorHome(), "plugin-service.log"), "a");
     const child = spawn(binary, [], {
         detached: true,
         windowsHide: true,
         stdio: ["ignore", log, log],
-        cwd: SUPERVISOR_HOME,
-        env: { ...process.env, HOME: process.env.HOME || HOME_DIR, FASTMCP_HOST: listenHost, FASTMCP_PORT: String(SUPERVISOR_PORT) },
+        cwd: supervisorHome(),
+        env: { ...process.env, HOME: process.env.HOME || homeDir(), FASTMCP_HOST: listenHost, FASTMCP_PORT: String(SUPERVISOR_PORT) },
     });
     child.unref();
     closeSync(log);
-    writeJsonFile(SERVICE_STATE_PATH, { pid: child.pid, binary, listenHost, port: SUPERVISOR_PORT, startedAt: new Date().toISOString() });
+    writeJsonFile(serviceStatePath(), { pid: child.pid, binary, listenHost, port: SUPERVISOR_PORT, startedAt: new Date().toISOString() });
     return child.pid;
 }
 
@@ -341,7 +383,7 @@ async function ensureSupervisorService() {
 function writeConnectionConfig() {
     let existing = {};
     try {
-        existing = readJsonObject(CONNECTION_PATH) ?? {};
+        existing = readJsonObject(connectionPath()) ?? {};
     } catch { }
     const token = readLocalToken();
     const merged = {
@@ -351,7 +393,7 @@ function writeConnectionConfig() {
         machine: typeof existing.machine === "string" && existing.machine.trim() ? existing.machine : os.hostname(),
     };
     if (!merged.token) return false;
-    if (!USER_ENV.url && !USER_ENV.token) writeJsonFile(CONNECTION_PATH, merged);
+    if (!userEnv("SUPERVISOR_URL") && !userEnv("SUPERVISOR_TOKEN")) writeJsonFile(connectionPath(), merged);
     return true;
 }
 
@@ -374,17 +416,17 @@ async function callSupervisorTool(endpoint, name, args, { signal, timeoutMs = 30
     const timeout = AbortSignal.timeout(timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
-    if (endpoint.token) headers.Authorization = `Bearer ${endpoint.token}`;
+    if (endpoint.mcpToken) headers.Authorization = `Bearer ${endpoint.mcpToken}`;
     let res, payload;
     try {
-        res = await fetch(`${endpoint.url}/mcp`, {
+        res = await fetch(endpoint.mcpUrl, {
             method: "POST",
             redirect: "error",
             signal: combined,
             headers,
             body: JSON.stringify({ jsonrpc: "2.0", id: `omp-plugin-${Date.now()}`, method: "tools/call", params: { name, arguments: args } }),
         });
-        if (res.status === 401) return { ok: false, error: `HTTP 401: ${endpoint.url} requires its registry token; set SUPERVISOR_TOKEN to the hub's registry-token` };
+        if (res.status === 401) return { ok: false, error: `HTTP 401: ${endpoint.mcpUrl} requires its registry token; set SUPERVISOR_TOKEN to the hub's registry-token` };
         if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
         if ((res.headers.get("content-type") ?? "").includes("text/event-stream")) {
             for (const line of (await res.text()).split("\n")) {
@@ -402,7 +444,7 @@ async function callSupervisorTool(endpoint, name, args, { signal, timeoutMs = 30
     } catch (error) {
         if (timeout.aborted) return { ok: false, error: `Supervisor ${name} timed out` };
         if (signal?.aborted) return { ok: false, error: "aborted" };
-        return { ok: false, error: `${endpoint.url} unreachable: ${errorMessage(error)}` };
+        return { ok: false, error: `${endpoint.mcpUrl} unreachable: ${errorMessage(error)}` };
     }
     if (!payload || typeof payload !== "object") return { ok: false, error: "empty MCP response" };
     if (payload.error) return { ok: false, error: typeof payload.error.message === "string" ? payload.error.message : "MCP error" };
@@ -1362,6 +1404,38 @@ async function targetAdd(tokens, endpoint) {
     return out.join("\n");
 }
 
+function hubAdminRefusal(sub, endpoint) {
+    if (endpoint.mode === "hub-local") return undefined;
+    return `/supervisor ${sub} is a hub-admin command, and this host is a client of ${endpoint.url} (${endpoint.urlSource}). Run it on the hub host itself; nothing was changed here.`;
+}
+
+async function nativeJobsList(sessionId) {
+    if (!sessionId) return "This session has no id yet, so it cannot own remote jobs.";
+    const endpoint = resolveEndpoint();
+    const rows = [];
+    let offset = 0, scanned = 0, total = 0;
+    for (let page = 0; page < HUB_JOBS_MAX_PAGES; page++) {
+        const res = await callSupervisorTool(endpoint, "jobs", { limit: HUB_JOBS_PAGE_LIMIT, offset }, { timeoutMs: 30000 });
+        if (!res.ok) return `Supervisor jobs failed: ${res.error}`;
+        const payload = parseRecord(res.text);
+        if (!payload || !Array.isArray(payload.jobs)) return "Supervisor returned an unreadable jobs page.";
+        total = Number(payload.total) || 0;
+        scanned += payload.jobs.length;
+        for (const row of payload.jobs) {
+            if (isRecord(row) && (row.parent_session_id === sessionId || row.root_session_id === sessionId)) rows.push(row);
+        }
+        if (!Number.isSafeInteger(payload.next_offset) || payload.next_offset <= offset) break;
+        offset = payload.next_offset;
+    }
+    const head = `Remote jobs of this session (tracking: native omp remote tool; ${scanned} of ${total} hub jobs scanned, newest first):`;
+    if (rows.length === 0) return `${head}\nNone.`;
+    return [head, ...rows.map(row => {
+        const started = Date.parse(row.start_time || "");
+        const age = Number.isFinite(started) ? `, started ${elapsedLabel(Date.now() - started)} ago` : "";
+        return `- ${row.job_id}${row.machine ? ` on ${row.machine}` : ""}: ${row.status || "unknown"}${row.model ? `, ${row.model}` : ""}${age}`;
+    }), "/supervisor transcript <sub_ job id> shows a job's transcript."].join("\n");
+}
+
 function targetList() {
     let machines;
     try {
@@ -1413,8 +1487,8 @@ async function hubCommand(listenArg) {
     if (!/^[A-Za-z0-9.:%-]+$/.test(listenHost)) return `Invalid listen host ${JSON.stringify(listenArg)}.`;
     const previousUrl = localUrl();
     const nextUrl = urlForHost(listenHost);
-    writeJsonFile(HUB_CONFIG_PATH, { listenHost });
-    const out = [`Saved listen host ${listenHost} in ${HUB_CONFIG_PATH}; bootstrap starts the local service this way from now on.`];
+    writeJsonFile(hubConfigPath(), { listenHost });
+    const out = [`Saved listen host ${listenHost} in ${hubConfigPath()}; bootstrap starts the local service this way from now on.`];
     const state = readServiceState();
     if (pluginOwnsProcess(state)) {
         try {
@@ -1424,16 +1498,16 @@ async function hubCommand(listenArg) {
         }
         await waitHealthy(previousUrl, false, 10000);
         spawnSupervisor(state.binary, listenHost);
-        out.push(await waitHealthy(nextUrl, true, 15000) ? `Restarted the plugin-started service on ${nextUrl}.` : `Restarted the service, but ${nextUrl}/health is not answering yet; see ${path.join(SUPERVISOR_HOME, "plugin-service.log")}.`);
+        out.push(await waitHealthy(nextUrl, true, 15000) ? `Restarted the plugin-started service on ${nextUrl}.` : `Restarted the service, but ${nextUrl}/health is not answering yet; see ${path.join(supervisorHome(), "plugin-service.log")}.`);
     } else if (await supervisorHealthy(previousUrl)) {
         out.push(`A Supervisor already answers on ${previousUrl}, but this plugin did not start it, so it was left running. Restart it yourself with FASTMCP_HOST=${listenHost} (and auth on), or stop it and start a new omp session.`);
     } else {
-        out.push(await ensureSupervisorService() ? `Started the local service on ${nextUrl}.` : `Could not start the local service on ${nextUrl}; see ${path.join(SUPERVISOR_HOME, "plugin-service.log")}.`);
+        out.push(await ensureSupervisorService() ? `Started the local service on ${nextUrl}.` : `Could not start the local service on ${nextUrl}; see ${path.join(supervisorHome(), "plugin-service.log")}.`);
     }
     const conn = readConnection();
-    if (!USER_ENV.url && !conn.invalid && (!conn.connection.url || trimSlash(conn.connection.url) === previousUrl)) {
-        writeJsonFile(CONNECTION_PATH, { ...conn.connection, url: nextUrl });
-        out.push(`Updated ${CONNECTION_PATH} to ${nextUrl}. Restart omp on this host so its MCP connection follows.`);
+    if (!userEnv("SUPERVISOR_URL") && !conn.invalid && (!conn.connection.url || trimSlash(conn.connection.url) === previousUrl)) {
+        writeJsonFile(connectionPath(), { ...conn.connection, url: nextUrl });
+        out.push(`Updated ${connectionPath()} to ${nextUrl}. Restart omp on this host so its MCP connection follows.`);
     }
     if (isLoopbackHost(listenHost)) {
         out.push("The hub listens on loopback only: other machines cannot reach it. Use /supervisor hub <private-ip> (for example the Tailscale IP) to serve clients.");
@@ -1446,13 +1520,18 @@ async function hubCommand(listenArg) {
     return out.join("\n");
 }
 
-async function statusCommand(tracker, identity, remoteOwner) {
+async function statusCommand(tracker, identity, remoteOwner, trackingLabel) {
     const endpoint = resolveEndpoint();
-    const out = [`Supervisor plugin ${SUPERVISOR_PLUGIN_VERSION}`, `mode: ${endpoint.mode}`, `url: ${endpoint.url}`];
-    if (endpoint.invalid) out.push(`warning: ${CONNECTION_PATH} is not valid JSON`);
-    out.push(`health: ${await supervisorHealthy(endpoint.url) ? "healthy" : "unreachable"}`);
+    const out = [
+        `Supervisor client ${SUPERVISOR_PLUGIN_VERSION} (${RUNS_AS_PLUGIN ? "plugin" : "loose extension"})`,
+        `mode: ${endpoint.mode}`,
+        `url: ${endpoint.url} (${endpoint.urlSource})`,
+        `mcp: ${endpoint.mcpUrl} (${endpoint.mcpSource})`,
+    ];
+    if (endpoint.invalid) out.push(`warning: ${connectionPath()} is not valid JSON`);
+    out.push(`health: ${await supervisorHealthy(mcpBaseUrl(endpoint)) ? "healthy" : "unreachable"}`);
     try {
-        const res = await fetch(`${endpoint.url}/mcp`, {
+        const res = await fetch(endpoint.mcpUrl, {
             method: "POST",
             signal: AbortSignal.timeout(5000),
             headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
@@ -1467,24 +1546,27 @@ async function statusCommand(tracker, identity, remoteOwner) {
         const state = readServiceState();
         out.push(`listen host: ${hubListenHost()}`);
         out.push(`local service: ${pluginOwnsProcess(state) ? `started by this plugin (pid ${state.pid})` : "not started by this plugin"}`);
+    } else {
+        out.push("bootstrap: off (client of a remote hub: no local service, no binary download)");
     }
     out.push(`registered agent: ${identity().agentId || "not registered"}`);
     out.push(`remote tool: ${remoteOwner()}`);
-    out.push(`job tracking: ${tracker.mechanism()}, ${tracker.count()} tracked`);
+    out.push(`job tracking: ${trackingLabel()}`);
     return out.join("\n");
 }
 
 export default function supervisorAgent(pi) {
-    if (existsSync(LOOSE_COPY_PATH)) {
+    if (RUNS_AS_PLUGIN && existsSync(looseCopyPath())) {
         let warned = false;
         pi.on("session_start", (_event, ctx) => {
             if (warned || !ctx.hasUI) return;
             warned = true;
-            ctx.ui.notify(`omp-supervisor plugin is inactive: ${LOOSE_COPY_PATH} (the standalone Supervisor client) is also installed. Running both would register this session twice and deliver Supervisor messages twice. Keep one: delete that file, or uninstall the omp-supervisor plugin.`, "warning");
+            ctx.ui.notify(`omp-supervisor plugin is inactive: ${looseCopyPath()} (the standalone Supervisor client) is also installed. Running both would register this session twice and deliver Supervisor messages twice. Keep one: delete that file, or uninstall the omp-supervisor plugin.`, "warning");
         });
         return;
     }
-    exportClientEnv();
+    ompSupervisorMcpUrl = () => readOmpSupervisorMcpUrl(pi);
+    if (RUNS_AS_PLUGIN) exportClientEnv();
     const tracker = createJobTracker(pi);
     let stopCurrent = async () => { };
     let onAgentEnd = () => { };
@@ -1507,6 +1589,10 @@ export default function supervisorAgent(pi) {
         pi.registerTool(createRemoteTool(pi, tracker, () => selfIdentity()));
         remoteOwner = "plugin";
     };
+    const pluginTracks = () => remoteOwner === "plugin";
+    const trackingLabel = () => remoteOwner === "native"
+        ? "native omp tracker (plugin tracker off)"
+        : `${tracker.mechanism()}, ${tracker.count()} tracked`;
     pi.registerCommand("supervisor", {
         description: "Supervisor plugin: status | jobs | transcript <job> | hub [listenHost] | target add|list|remove",
         getArgumentCompletions: prefix => ["status", "jobs", "transcript", "hub", "target add", "target list", "target remove"].filter(item => item.startsWith(prefix.trim())).map(value => ({ value, label: value })),
@@ -1515,14 +1601,16 @@ export default function supervisorAgent(pi) {
             const sub = tokens[0] || "status";
             let text;
             try {
-                if (sub === "status") text = await statusCommand(tracker, () => selfIdentity(), () => remoteOwner === "native" ? "native remote tool (this omp ships its own)" : remoteOwner === "plugin" ? "registered by this plugin" : remoteOwner);
-                else if (sub === "jobs") text = tracker.list();
+                if (sub === "status") text = await statusCommand(tracker, () => selfIdentity(), () => remoteOwner === "native" ? "native remote tool (this omp ships its own)" : remoteOwner === "plugin" ? "registered by this plugin" : remoteOwner, trackingLabel);
+                else if (sub === "jobs") text = pluginTracks() ? tracker.list() : await nativeJobsList(ctx.sessionManager?.getSessionId?.() || "");
                 else if (sub === "transcript") text = await transcriptCommand(tracker, tokens[1], ctx);
-                else if (sub === "hub") text = await hubCommand(tokens[1]);
-                else if (sub === "target" && tokens[1] === "add") text = await targetAdd(tokens.slice(2), resolveEndpoint());
-                else if (sub === "target" && tokens[1] === "list") text = targetList();
-                else if (sub === "target" && tokens[1] === "remove") text = targetRemove(tokens[2]);
-                else text = "Usage: /supervisor status | /supervisor jobs | /supervisor transcript <job> | /supervisor hub [listenHost] | /supervisor target add <name> <sshHost> [--os linux|darwin|windows] | /supervisor target list | /supervisor target remove <name>";
+                else if (sub === "hub" || sub === "target") text = hubAdminRefusal(sub === "target" ? `target ${tokens[1] || ""}`.trim() : sub, resolveEndpoint())
+                    ?? (sub === "hub" ? await hubCommand(tokens[1])
+                        : tokens[1] === "add" ? await targetAdd(tokens.slice(2), resolveEndpoint())
+                        : tokens[1] === "list" ? targetList()
+                        : tokens[1] === "remove" ? targetRemove(tokens[2])
+                        : undefined);
+                if (text === undefined && !["status", "jobs", "transcript"].includes(sub)) text = "Usage: /supervisor status | /supervisor jobs | /supervisor transcript <job> | /supervisor hub [listenHost] | /supervisor target add <name> <sshHost> [--os linux|darwin|windows] | /supervisor target list | /supervisor target remove <name>";
             } catch (error) {
                 text = `/supervisor ${sub} failed: ${errorMessage(error)}`;
             }
@@ -1568,7 +1656,7 @@ export default function supervisorAgent(pi) {
         onAgentEnd = () => { };
         onTurn = () => { };
         ensureRemoteTool();
-        tracker.start(ctx);
+        if (pluginTracks()) tracker.start(ctx);
         if (!ctx.hasUI && process.env.SUPERVISOR_AGENT_FORCE !== "1")
             return;
         if (process.env.SUPERVISOR_BOOTSTRAP !== "0" && resolveEndpoint().mode === "hub-local") {
@@ -1585,7 +1673,7 @@ export default function supervisorAgent(pi) {
             return;
         const notify = (text, level = "warning") => ctx.ui?.notify?.(text, level);
         const endpoint = resolveEndpoint();
-        if (endpoint.invalid && !(USER_ENV.url && USER_ENV.token)) {
+        if (endpoint.invalid && !(userEnv("SUPERVISOR_URL") && userEnv("SUPERVISOR_TOKEN"))) {
             notify("Supervisor enrollment unavailable: cannot read valid supervisor-connection.json. Check its JSON and permissions; credentials were not printed.");
             return;
         }

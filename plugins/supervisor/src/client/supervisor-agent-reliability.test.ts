@@ -6,7 +6,7 @@ import supervisorAgent from "./supervisor-agent.extension.js";
 
 const originalFetch = globalThis.fetch;
 const originalTimeout = globalThis.setTimeout;
-const envKeys = ["HOME", "USERPROFILE", "SUPERVISOR_URL", "SUPERVISOR_TOKEN", "SUPERVISOR_AGENT_FORCE", "SUPERVISOR_MACHINE"];
+const envKeys = ["HOME", "USERPROFILE", "SUPERVISOR_URL", "SUPERVISOR_TOKEN", "SUPERVISOR_AGENT_FORCE", "SUPERVISOR_MACHINE", "SUPERVISOR_BOOTSTRAP"];
 let oldEnv, home, homedirSpy;
 beforeEach(() => {
   oldEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
@@ -17,6 +17,8 @@ beforeEach(() => {
   process.env.SUPERVISOR_URL = "http://127.0.0.1:18200";
   process.env.SUPERVISOR_TOKEN = "test-enrollment";
   delete process.env.SUPERVISOR_AGENT_FORCE;
+  // Delivery tests: a build without a default hub must not probe or start a local service here.
+  process.env.SUPERVISOR_BOOTSTRAP = "0";
 });
 afterEach(() => {
   globalThis.fetch = originalFetch; globalThis.setTimeout = originalTimeout;
@@ -38,7 +40,7 @@ function harness({ idle = true, deliveries = [], registerError = null, finish = 
     clearTimer: id => timers.delete(id),
   };
   const pi = {
-    on: (event, fn) => hooks.set(event, fn), getSessionName: () => "smoke",
+    on: (event, fn) => hooks.set(event, fn), getSessionName: () => "smoke", registerCommand() {},
     logger: { warn: (message, meta) => warnings.push({ message, meta }) },
     sendUserMessage: (text, options) => { injected.push({ text, options }); if (finish) end("reply:" + text); },
     sendMessage: (message, options) => { injected.push({ message, options }); if (finish) end("reply:" + message.details.message); },
@@ -176,7 +178,7 @@ test("missing enrollment settings are diagnosed instead of silently ignored", as
     expect(h.calls).toHaveLength(0);
     expect(h.timers.size).toBe(0);
     expect(h.notifications).toHaveLength(1);
-    expect(h.notifications[0].level).toBe("warn");
+    expect(h.notifications[0].level).toBe("warning");
     expect(h.notifications[0].text).toMatch(/enrollment/i);
     expect(h.notifications[0].text).toMatch(/url/i);
     expect(h.notifications[0].text).toMatch(/token|credential/i);
