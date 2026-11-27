@@ -1487,6 +1487,9 @@ func startJob(spec jobSpec) (*Job, error) {
 
 	go func() {
 		defer close(job.monitorDone)
+		if child != nil {
+			defer compressCaptureLogged(store, job)
+		}
 		defer logFile.Close()
 		if stderrFile != nil {
 			defer stderrFile.Close()

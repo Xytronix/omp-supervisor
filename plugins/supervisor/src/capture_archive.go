@@ -244,8 +244,7 @@ func captureNotReady(job *Job, logRequired bool) error {
 		return fmt.Errorf("capture is not ready to acknowledge: capture is still draining")
 	}
 	if logRequired {
-		info, err := os.Lstat(job.LogPath)
-		if err != nil || job.LogPath == "" || !info.Mode().IsRegular() {
+		if job.LogPath == "" || !localCapturePresent(job.LogPath) {
 			return fmt.Errorf("capture is not ready to acknowledge: raw capture log is not present")
 		}
 	}
@@ -530,6 +529,11 @@ func removeVerifiedLocals(store *JobStore, job *Job, meta *CaptureArchive, alrea
 		if err := os.Remove(obj.LocalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("capture archive verified but local %s remains: %w", obj.Kind, err)
 		}
+		if obj.Kind == "log" {
+			if err := os.Remove(captureGzipPath(obj.LocalPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("capture archive verified but local %s remains: %w", obj.Kind, err)
+			}
+		}
 	}
 	job.mu.Lock()
 	if job.CaptureArchive != nil {
@@ -549,7 +553,7 @@ func removeVerifiedLocals(store *JobStore, job *Job, meta *CaptureArchive, alrea
 }
 
 func verifyLocalOriginal(obj ArchiveObject) error {
-	sum, size, err := hashFile(obj.LocalPath)
+	sum, size, _, err := hashLocalCapture(obj.LocalPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -661,7 +665,7 @@ func restoreJobCapture(ctx context.Context, store *JobStore, job *Job) error {
 }
 
 func stageRestoreFile(ctx context.Context, tr archiveTransport, obj ArchiveObject, dest string) (string, error) {
-	sum, size, err := hashFile(dest)
+	sum, size, _, err := hashLocalCapture(dest)
 	if err == nil {
 		if sum == obj.OriginalSHA256 && size == obj.OriginalSize {
 			return "", nil
@@ -723,12 +727,26 @@ func stageRestoreFile(ctx context.Context, tr archiveTransport, obj ArchiveObjec
 
 func uploadCapture(tr archiveTransport, remoteDir, remoteName, localPath, kind string, compress bool) (ArchiveObject, error) {
 	rawSum, rawSize, err := hashFile(localPath)
-	if err != nil {
-		return ArchiveObject{}, err
-	}
 	uploadPath := localPath
 	compSum, compSize := rawSum, rawSize
-	if compress {
+	if compress && errors.Is(err, os.ErrNotExist) {
+
+		var compressed bool
+		rawSum, rawSize, compressed, err = hashLocalCapture(localPath)
+		if err != nil {
+			return ArchiveObject{}, err
+		}
+		if !compressed {
+			return ArchiveObject{}, os.ErrNotExist
+		}
+		uploadPath = captureGzipPath(localPath)
+		compSum, compSize, err = hashFile(uploadPath)
+		if err != nil {
+			return ArchiveObject{}, err
+		}
+	} else if err != nil {
+		return ArchiveObject{}, err
+	} else if compress {
 		tmp, err := os.CreateTemp("", "supervisor-capture-*.gz")
 		if err != nil {
 			return ArchiveObject{}, err
@@ -1258,6 +1276,7 @@ func archiveCaptureWithRetry(store *JobStore, job *Job) {
 }
 func startCaptureRetentionWorker() {
 	go retryAcknowledgedCaptures(globalStore)
+	go compressFinishedCaptures(globalStore)
 	go func() {
 		runCaptureRetentionSafely()
 		ticker := time.NewTicker(time.Hour)

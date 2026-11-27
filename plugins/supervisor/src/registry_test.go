@@ -98,7 +98,7 @@ func TestRegisterAcceptsRotatedToken(t *testing.T) {
 }
 
 func TestRegisterHonorsMachineAllowlist(t *testing.T) {
-	t.Setenv("SUPERVISOR_REGISTRY_ALLOW_MACHINES", "mac-*,oracle")
+	t.Setenv("SUPERVISOR_REGISTRY_ALLOW_MACHINES", "mac-*,hub-host")
 	_, srv := newTestRegistry(t, testEnrollToken)
 
 	if code, _ := doJSON(t, http.MethodPost, srv.URL+"/api/agents/register", testEnrollToken, map[string]any{"machine": "mac-mini"}); code != http.StatusOK {
@@ -190,7 +190,7 @@ func TestRegistryPersistsOnlyTokenHashes(t *testing.T) {
 func TestHeartbeatRefreshesAndForeignTokenRejected(t *testing.T) {
 	registry, srv := newTestRegistry(t, testEnrollToken)
 	id, token := registerTestAgent(t, srv, map[string]any{"machine": "mac", "ttl_seconds": 30})
-	otherID, otherToken := registerTestAgent(t, srv, map[string]any{"machine": "oracle"})
+	otherID, otherToken := registerTestAgent(t, srv, map[string]any{"machine": "hub-host"})
 
 	registry.mu.Lock()
 	registry.agents[id].LastSeen = time.Now().Add(-20 * time.Second)

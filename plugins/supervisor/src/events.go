@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -59,37 +58,43 @@ func safeChildEvent(line []byte) bool {
 
 func readJobEvents(ctx context.Context, path string, after int64, limit int) (jobEventPage, error) {
 	page := jobEventPage{FromCursor: after, NextCursor: after, Events: make([]jobEvent, 0)}
-	file, err := os.Open(path)
+
+	capture, err := openCapture(path)
 	if err != nil {
 		return page, fmt.Errorf("RPC log unavailable: %w", err)
 	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return page, fmt.Errorf("RPC log stat: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return page, fmt.Errorf("RPC log is not a regular file")
-	}
+	defer capture.Close()
+	size := capture.Size()
+	var reader io.Reader
 
-	if after > info.Size() {
+	if after > size {
 		page.Reset = true
 	} else if after > 0 {
+		reader, err = capture.ReaderFrom(after - 1)
+		if err != nil {
+			return page, fmt.Errorf("RPC cursor boundary: %w", err)
+		}
 		var previous [1]byte
-		if _, err := file.ReadAt(previous[:], after-1); err != nil {
+		if _, err := io.ReadFull(reader, previous[:]); err != nil {
 			return page, fmt.Errorf("RPC cursor boundary: %w", err)
 		}
 		page.Reset = previous[0] != '\n'
 	}
 	if page.Reset {
 		page.FromCursor, page.NextCursor = 0, 0
+		reader = nil
 	}
-	if page.NextCursor == info.Size() {
+	if page.NextCursor == size {
 
 		return page, ctx.Err()
 	}
+	if reader == nil {
+		if reader, err = capture.ReaderFrom(page.NextCursor); err != nil {
+			return page, fmt.Errorf("RPC log read: %w", err)
+		}
+	}
 
-	scanner := newRPCLogScanner(io.NewSectionReader(file, page.NextCursor, info.Size()-page.NextCursor))
+	scanner := newRPCLogScanner(io.LimitReader(reader, size-page.NextCursor))
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return page, err

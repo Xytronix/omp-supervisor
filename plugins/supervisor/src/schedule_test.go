@@ -120,7 +120,7 @@ func TestScheduleOnFinishedJobStartsImmediately(t *testing.T) {
 		ID:        "sub_already_done",
 		Status:    "done",
 		CWD:       tempDir,
-		SessionID: "01a037dd-8b65-713d-b297-2eb4954fc631",
+		SessionID: "01a037dd-8b65-7000-8000-000000000017",
 		StartTime: time.Now().Add(-time.Minute),
 		EndTime:   time.Now(),
 	}

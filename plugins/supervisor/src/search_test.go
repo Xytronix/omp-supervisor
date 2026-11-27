@@ -15,21 +15,21 @@ import (
 func TestNormalizeSessionID(t *testing.T) {
 	cases := map[string]string{
 		"": " ",
-		"  01a033d1-abf2-7000-8824-20f09687ad0e  ": "01a033d1-abf2-7000-8824-20f09687ad0e",
-		"omp:01a033d1-abf2-7000-8824-20f09687ad0e": "01a033d1-abf2-7000-8824-20f09687ad0e",
-		"OMP:01a033d1-abf2-7000-8824-20f09687ad0e": "01a033d1-abf2-7000-8824-20f09687ad0e",
+		"  01a033d1-abf2-7000-8000-000000000011  ": "01a033d1-abf2-7000-8000-000000000011",
+		"omp:01a033d1-abf2-7000-8000-000000000011": "01a033d1-abf2-7000-8000-000000000011",
+		"OMP:01a033d1-abf2-7000-8000-000000000011": "01a033d1-abf2-7000-8000-000000000011",
 	}
 
 	if got := normalizeSessionID(""); got != "" {
 		t.Errorf("empty => %q", got)
 	}
-	if got := normalizeSessionID("  01a033d1-abf2-7000-8824-20f09687ad0e  "); got != "01a033d1-abf2-7000-8824-20f09687ad0e" {
+	if got := normalizeSessionID("  01a033d1-abf2-7000-8000-000000000011  "); got != "01a033d1-abf2-7000-8000-000000000011" {
 		t.Errorf("trim => %q", got)
 	}
-	if got := normalizeSessionID("omp:01a033d1-abf2-7000-8824-20f09687ad0e"); got != "01a033d1-abf2-7000-8824-20f09687ad0e" {
+	if got := normalizeSessionID("omp:01a033d1-abf2-7000-8000-000000000011"); got != "01a033d1-abf2-7000-8000-000000000011" {
 		t.Errorf("prefix => %q", got)
 	}
-	if got := normalizeSessionID("OMP:01a033d1-abf2-7000-8824-20f09687ad0e"); got != "01a033d1-abf2-7000-8824-20f09687ad0e" {
+	if got := normalizeSessionID("OMP:01a033d1-abf2-7000-8000-000000000011"); got != "01a033d1-abf2-7000-8000-000000000011" {
 		t.Errorf("prefix case => %q", got)
 	}
 	_ = cases
@@ -100,7 +100,7 @@ func TestLocalSessionSearchAndRead(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	sessionID := "01a033d1-abf2-7000-8824-20f09687ad0e"
+	sessionID := "01a033d1-abf2-7000-8000-000000000011"
 	path := filepath.Join(dir, "2026-08-24T12-49-34-194Z_"+sessionID+".jsonl")
 	body := strings.Join([]string{
 		`{"type":"title","v":1,"title":"Investigate Bifrost and oh-my-pi configuration","updatedAt":"2026-08-24T12:58:35.290Z"}`,

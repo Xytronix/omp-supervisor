@@ -756,7 +756,7 @@ func TestSilentSessionWithoutTerminalFrameForceFinishes(t *testing.T) {
 	fake.emit(map[string]any{"type": "ready", "protocolVersion": 1})
 	fake.waitForCommand(t, "prompt")
 
-	fake.setState(rpcState{SessionID: "01a074f9-9990-7000-af48-ca4ae705bc62"})
+	fake.setState(rpcState{SessionID: "01a074f9-9990-7000-8000-000000000012"})
 
 	select {
 	case <-fake.stdinEOF:
@@ -767,7 +767,7 @@ func TestSilentSessionWithoutTerminalFrameForceFinishes(t *testing.T) {
 
 	job.mu.RLock()
 	defer job.mu.RUnlock()
-	if job.SessionID != "01a074f9-9990-7000-af48-ca4ae705bc62" {
+	if job.SessionID != "01a074f9-9990-7000-8000-000000000012" {
 		t.Errorf("expected the session id reported by get_state, got %q", job.SessionID)
 	}
 }

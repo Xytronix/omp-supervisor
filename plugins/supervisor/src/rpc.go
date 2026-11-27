@@ -458,10 +458,17 @@ func (c *rpcChild) readLoop(stdout io.ReadCloser) {
 		defer close(c.readDone)
 	}
 	var input io.Reader = stdout
+	var capture *captureWriter
 	if c.logFile != nil {
 
-		input = io.TeeReader(stdout, c.logFile)
+		if window := captureCoalesceWindow(); window > 0 {
+			capture = newCaptureWriter(c.logFile, window)
+			input = io.TeeReader(stdout, capture)
+		} else {
+			input = io.TeeReader(stdout, c.logFile)
+		}
 	}
+
 	scanner := newRPCLogScanner(input)
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -472,7 +479,14 @@ func (c *rpcChild) readLoop(stdout io.ReadCloser) {
 		}
 		c.handleFrame(frame)
 	}
-	if err := scanner.Err(); err != nil {
+	captureErr := scanner.Err()
+	if capture != nil {
+
+		if err := capture.Close(); err != nil && captureErr == nil {
+			captureErr = err
+		}
+	}
+	if err := captureErr; err != nil {
 		log.Printf("job %s: RPC stream read failed: %v", c.job.ID, err)
 		c.job.mu.Lock()
 		c.job.CaptureError = sanitizeSecretString(err.Error())
@@ -1146,20 +1160,21 @@ func (j *Job) recoverRPCMetadata() {
 	if !j.Steerable || j.LogPath == "" {
 		return
 	}
-	file, err := os.Open(j.LogPath)
+	capture, err := openCapture(j.LogPath)
 	if err != nil {
 		return
 	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return
-	}
+	defer capture.Close()
+	size := capture.Size()
 	start := int64(0)
-	if info.Size() > rpcRecoveryTailBytes {
-		start = info.Size() - rpcRecoveryTailBytes
+	if size > rpcRecoveryTailBytes {
+		start = size - rpcRecoveryTailBytes
 	}
-	scanner := newRPCLogScanner(io.NewSectionReader(file, start, info.Size()-start))
+	reader, err := capture.ReaderFrom(start)
+	if err != nil {
+		return
+	}
+	scanner := newRPCLogScanner(io.LimitReader(reader, size-start))
 	var report string
 
 	skipPartial := start > 0

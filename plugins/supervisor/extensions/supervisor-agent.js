@@ -69,7 +69,7 @@ function agentPromptSource(source) {
     return out;
 }
 
-const SUPERVISOR_PLUGIN_VERSION = "0.3.1";
+const SUPERVISOR_PLUGIN_VERSION = "0.3.2";
 const SUPERVISOR_RELEASE_REPO = "Xytronix/omp-supervisor";
 const SUPERVISOR_PORT = Number.isSafeInteger(Number(process.env.SUPERVISOR_PORT)) && Number(process.env.SUPERVISOR_PORT) > 0 ? Number(process.env.SUPERVISOR_PORT) : 18200;
 const HOME_DIR = os.homedir();

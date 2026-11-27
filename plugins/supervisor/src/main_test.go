@@ -193,13 +193,13 @@ func TestShouldAllowHome(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	defer os.Setenv("HOME", origHome)
 
-	os.Setenv("HOME", "/home/ubuntu")
+	os.Setenv("HOME", "/home/operator")
 
-	if !shouldAllowHome("/home/ubuntu") {
-		t.Errorf("expected /home/ubuntu to allow home")
+	if !shouldAllowHome("/home/operator") {
+		t.Errorf("expected /home/operator to allow home")
 	}
-	if !shouldAllowHome("/home/ubuntu/") {
-		t.Errorf("expected /home/ubuntu/ to allow home")
+	if !shouldAllowHome("/home/operator/") {
+		t.Errorf("expected /home/operator/ to allow home")
 	}
 	if shouldAllowHome("/tmp/omp-test") {
 		t.Errorf("expected /tmp/omp-test to NOT allow home")
@@ -227,7 +227,7 @@ func TestBuildOmpArgs(t *testing.T) {
 	})
 
 	t.Run("with allowHome, yolo, maxTime", func(t *testing.T) {
-		args := buildOmpArgs("Refactor code", "cursor/cursor-grok-4.6", "medium", "/home/ubuntu", true, "10m", "", false, true, false, "")
+		args := buildOmpArgs("Refactor code", "cursor/cursor-grok-4.6", "medium", "/home/operator", true, "10m", "", false, true, false, "")
 		hasAllowHome := false
 		hasAutoApprove := false
 		hasMaxTime := false
@@ -254,7 +254,7 @@ func TestBuildOmpArgs(t *testing.T) {
 	})
 
 	t.Run("resume with sessionID", func(t *testing.T) {
-		sessID := "01a037dd-8b65-713d-b297-2eb4954fc631"
+		sessID := "01a037dd-8b65-7000-8000-000000000017"
 		args := buildOmpArgs("Follow up prompt", "google-antigravity/gemini-3.7-flash", "high", "/tmp/project", false, "", sessID, false, false, false, "")
 		hasR := false
 		hasC := false
@@ -295,7 +295,7 @@ func TestBuildOmpArgs(t *testing.T) {
 	})
 
 	t.Run("sessionID takes precedence over continue", func(t *testing.T) {
-		sessID := "01a037dd-8b65-713d-b297-2eb4954fc631"
+		sessID := "01a037dd-8b65-7000-8000-000000000017"
 		args := buildOmpArgs("Follow up prompt", "google-antigravity/gemini-3.7-flash", "high", "/tmp/project", false, "", sessID, true, false, false, "")
 		hasR := false
 		hasC := false
@@ -316,7 +316,7 @@ func TestBuildOmpArgs(t *testing.T) {
 	})
 
 	t.Run("steerable job runs rpc mode without an argv prompt", func(t *testing.T) {
-		sessID := "01a037dd-8b65-713d-b297-2eb4954fc631"
+		sessID := "01a037dd-8b65-7000-8000-000000000017"
 		args := buildOmpArgs("Investigate flake", "google-antigravity/gemini-3.7-flash", "high", "/tmp/project", true, "10m", sessID, false, false, true, "")
 		if args[0] != "--mode=rpc" {
 			t.Fatalf("expected --mode=rpc first, got %v", args)
@@ -353,12 +353,12 @@ func TestSessionFileParsing(t *testing.T) {
 		t.Fatalf("failed to create session dir: %v", err)
 	}
 
-	sessionID := "01a037dd-8b65-713d-b297-2eb4954fc631"
+	sessionID := "01a037dd-8b65-7000-8000-000000000017"
 	sessFileName := fmt.Sprintf("2026-08-25T07-41-01-157Z_%s.jsonl", sessionID)
 	sessFilePath := filepath.Join(sessDir, sessFileName)
 
 	jsonlLines := []string{
-		`{"type":"session","version":3,"id":"01a037dd-8b65-713d-b297-2eb4954fc631","timestamp":"2026-08-25T07:41:01.157Z","cwd":"/tmp/test-project"}`,
+		`{"type":"session","version":3,"id":"01a037dd-8b65-7000-8000-000000000017","timestamp":"2026-08-25T07:41:01.157Z","cwd":"/tmp/test-project"}`,
 		`{"type":"model_change","id":"02c00365","parentId":null,"timestamp":"2026-08-25T07:41:01.899Z","model":"google-antigravity/gemini-3.7-flash","resolvedModelIsFallback":false}`,
 		`{"type":"thinking_level_change","id":"6fb0d849","parentId":"02c00365","timestamp":"2026-08-25T07:41:01.899Z","thinkingLevel":"high","configured":null}`,
 		`{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_1","toolName":"write","args":{"path":"pkg/main.go"}}}`,
@@ -468,7 +468,7 @@ func TestFindSessionFileHomeRelativeDirs(t *testing.T) {
 		return path
 	}
 
-	homeSession := write("-", "2026-09-06T04-28-29-968Z_01a074f9-9990-7000-af48-ca4ae705bc62.jsonl")
+	homeSession := write("-", "2026-09-06T04-28-29-968Z_01a074f9-9990-7000-8000-000000000012.jsonl")
 	repoSession := write("-mcp-sidecars-supervisor", "2026-09-06T04-46-07-404Z_01a07509-bc2c-7000-acdc-52540ff98009.jsonl")
 	outsideSession := write("-tmp-oh-my-pi", "2026-09-06T04-50-00-000Z_01a07510-1111-7000-8000-52540ff98010.jsonl")
 
@@ -578,7 +578,7 @@ func TestJobStoreAndTools(t *testing.T) {
 	dummyJob := &Job{
 		ID:             "sub_test_123",
 		PID:            99999,
-		SessionID:      "01a037dd-8b65-713d-b297-2eb4954fc631",
+		SessionID:      "01a037dd-8b65-7000-8000-000000000017",
 		Model:          "google-antigravity/gemini-3.7-flash:high",
 		ModelRequested: "google-antigravity/gemini-3.7-flash:high",
 		ModelResolved:  "google-antigravity/gemini-3.7-flash",
@@ -649,7 +649,7 @@ func TestJobStoreAndTools(t *testing.T) {
 	if statObj["model_resolved"] != "google-antigravity/gemini-3.7-flash" {
 		t.Errorf("unexpected model_resolved in status: %v", statObj["model_resolved"])
 	}
-	if statObj["session_id"] != "01a037dd-8b65-713d-b297-2eb4954fc631" {
+	if statObj["session_id"] != "01a037dd-8b65-7000-8000-000000000017" {
 		t.Errorf("unexpected session_id in status: %v", statObj["session_id"])
 	}
 
@@ -814,7 +814,7 @@ func TestDirectToolHandlers(t *testing.T) {
 	dummy := &Job{
 		ID:        "sub_alias_preferred",
 		Status:    "done",
-		SessionID: "01a033d1-abf2-7000-8824-20f09687ad0e",
+		SessionID: "01a033d1-abf2-7000-8000-000000000011",
 		StartTime: time.Now().Add(-time.Second),
 		EndTime:   time.Now(),
 	}
@@ -866,7 +866,7 @@ func TestActiveProcessCancellation(t *testing.T) {
 	job := &Job{
 		ID:        "sub_cancel_active_test",
 		PID:       pid,
-		SessionID: "01a037dd-8b65-713d-b297-2eb4954fc631",
+		SessionID: "01a037dd-8b65-7000-8000-000000000017",
 		Status:    "running",
 		StartTime: time.Now(),
 		cmd:       cmd,

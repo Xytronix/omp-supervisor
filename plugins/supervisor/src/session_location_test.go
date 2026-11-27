@@ -32,9 +32,9 @@ func TestSessionNeverSubstitutesAnotherLocalSession(t *testing.T) {
 	base := filepath.Join(home, ".omp", "agent", "sessions")
 	t.Setenv("HOME", home)
 	t.Setenv("OMP_SESSIONS_DIR", base)
-	t.Setenv("SUPERVISOR_MACHINE", "oracle-test")
+	t.Setenv("SUPERVISOR_MACHINE", "hub-test")
 	t.Setenv("SUPERVISOR_REMOTE_MACHINES_FILE", filepath.Join(home, "missing-machines.json"))
-	writeSessionFile(t, base, "-", "01a1ec4d-d572-75b5-8d67-bf5df88748b8", "Deploy omp fork release")
+	writeSessionFile(t, base, "-", "01a1ec4d-d572-7000-8000-000000000016", "Deploy omp fork release")
 
 	res, payload := callTool(t, handleSession, map[string]any{"session_id": "01a00000-0000-7000-8000-000000000001"})
 	if !res.IsError {
@@ -48,8 +48,8 @@ func TestSessionNeverSubstitutesAnotherLocalSession(t *testing.T) {
 		t.Fatalf("id prefix matched another session: %v", payload)
 	}
 
-	res, payload = callTool(t, handleSession, map[string]any{"session_id": "omp:01a1ec4d-d572-75b5-8d67-bf5df88748b8"})
-	if res.IsError || payload["session_id"] != "01a1ec4d-d572-75b5-8d67-bf5df88748b8" || payload["machine"] != "oracle-test" {
+	res, payload = callTool(t, handleSession, map[string]any{"session_id": "omp:01a1ec4d-d572-7000-8000-000000000016"})
+	if res.IsError || payload["session_id"] != "01a1ec4d-d572-7000-8000-000000000016" || payload["machine"] != "hub-test" {
 		t.Fatalf("local session read: %v", payload)
 	}
 }
@@ -59,8 +59,8 @@ func TestSessionReadsFromTheMachineThatHoldsIt(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("OMP_SESSIONS_DIR", filepath.Join(home, "sessions"))
-	t.Setenv("SUPERVISOR_MACHINE", "oracle-test")
-	writeSessionFile(t, filepath.Join(home, "sessions"), "-", "01a1ec4d-d572-75b5-8d67-bf5df88748b8", "Deploy omp fork release")
+	t.Setenv("SUPERVISOR_MACHINE", "hub-test")
+	writeSessionFile(t, filepath.Join(home, "sessions"), "-", "01a1ec4d-d572-7000-8000-000000000016", "Deploy omp fork release")
 
 	bin := filepath.Join(home, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
@@ -72,7 +72,7 @@ read line
 printf '%s\n' "$line" > "$FAKE_SSH_LOG"
 case "$line" in
  *01a00000-0000-7000-8000-000000000001*) echo '{"type":"session","found":true,"session":{"session_id":"01a00000-0000-7000-8000-000000000001","title":"worker-01 tasks","cwd":"/tmp","mtime":"2026-11-21T00:00:00Z"},"messages":[{"role":"user","text":"own prompt"},{"role":"tool","text":"x"}]}';;
- *01a1daec-7b15-73fd-947d-b8eb8e97fa2a*) echo '{"type":"session","found":true,"session":{"session_id":"01a1ec4d-d572-75b5-8d67-bf5df88748b8"},"messages":[]}';;
+ *01a1daec-7b15-7000-8000-000000000014*) echo '{"type":"session","found":true,"session":{"session_id":"01a1ec4d-d572-7000-8000-000000000016"},"messages":[]}';;
  *) echo '{"type":"session","found":false}';;
 esac
 `
@@ -86,10 +86,10 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("SUPERVISOR_REMOTE_MACHINES_FILE", machines)
-	for _, sid := range []string{"01a00000-0000-7000-8000-000000000001", "01a1daec-7b15-73fd-947d-b8eb8e97fa2a", "01a16d15-9485-7657-b790-5dd2e3d0b152"} {
+	for _, sid := range []string{"01a00000-0000-7000-8000-000000000001", "01a1daec-7b15-7000-8000-000000000014", "01a16d15-9485-7000-8000-000000000015"} {
 		registerTestAgent(t, srv, map[string]any{"machine": "worker-01", "name": "n-" + sid[:8], "session_id": sid, "harness": "omp-tty"})
 	}
-	registerTestAgent(t, srv, map[string]any{"machine": "laptop", "name": "l", "session_id": "01a1f8fe-8557-77bd-8bd8-5b490e63c213", "harness": "omp-tty"})
+	registerTestAgent(t, srv, map[string]any{"machine": "laptop", "name": "l", "session_id": "01a1f8fe-8557-7000-8000-000000000013", "harness": "omp-tty"})
 
 	res, payload := callTool(t, handleSession, map[string]any{"session_id": "01a00000-0000-7000-8000-000000000001", "max_messages": 5})
 	if res.IsError || payload["session_id"] != "01a00000-0000-7000-8000-000000000001" || payload["machine"] != "worker-01" || payload["title"] != "worker-01 tasks" {
@@ -104,9 +104,9 @@ esac
 	}
 
 	cases := map[string]string{
-		"01a1daec-7b15-73fd-947d-b8eb8e97fa2a": "host returned session",
-		"01a16d15-9485-7657-b790-5dd2e3d0b152": "was not found on machine worker-01",
-		"01a1f8fe-8557-77bd-8bd8-5b490e63c213": "laptop",
+		"01a1daec-7b15-7000-8000-000000000014": "host returned session",
+		"01a16d15-9485-7000-8000-000000000015": "was not found on machine worker-01",
+		"01a1f8fe-8557-7000-8000-000000000013": "laptop",
 	}
 	for sid, want := range cases {
 		res, payload := callTool(t, handleSession, map[string]any{"session_id": sid})

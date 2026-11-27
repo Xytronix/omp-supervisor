@@ -768,7 +768,7 @@ func handleSessions(_ context.Context, request mcp.CallToolRequest) (*mcp.CallTo
 	}
 	return toolJSON(map[string]any{
 		"sessions": listLocalSessions(query, cwd, limit),
-		"host":     "oracle",
+		"host":     localMachineName(),
 	}), nil
 }
 

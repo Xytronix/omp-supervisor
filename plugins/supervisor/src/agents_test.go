@@ -63,7 +63,7 @@ func TestAgentsListsRegisteredSessionsAndLocalJobs(t *testing.T) {
 		Status:    "running",
 		Steerable: true,
 		SessionID: "sess-local",
-		CWD:       "/home/ubuntu/repo",
+		CWD:       "/home/operator/repo",
 		Model:     "google-antigravity/gemini-3.7-flash",
 		Title:     "local child",
 		StartTime: time.Now(),
