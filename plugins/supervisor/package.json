@@ -1,0 +1,8 @@
+{
+  "name": "omp-supervisor",
+  "version": "0.1.0",
+  "private": true,
+  "omp": {
+    "extensions": ["extensions/supervisor-agent.js"]
+  }
+}

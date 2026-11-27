@@ -1,0 +1,6 @@
+{
+  "name": "omp-supervisor",
+  "version": "0.1.0",
+  "description": "Durable supervisor service plus agent bridge for omp jobs",
+  "mcpServers": ".mcp.json"
+}
